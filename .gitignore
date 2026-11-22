@@ -1,0 +1,33 @@
+# 本地依赖、缓存和日志
+node_modules/
+coverage/
+.cache/
+*.log
+
+# 本机配置和凭据
+.env
+.env.*
+!.env.example
+.aws/
+.agents/
+.codex/
+.vscode/
+.idea/
+
+# 系统与编辑器临时文件
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*~
+
+# 本地发布压缩包。网页使用的房主工具包随站点提交。
+/github-pages.zip
+
+# 本地课程材料和设计原稿
+/BITE3633_PROJECT SEM 1 2026-2027.pdf
+/Boardgame GamePlay.docx
+/photo_2026-11-21_20-41-24.jpg
+/页游草稿设计.png
+/Reborn, Respawn, Reroll - Game Rules (English).txt
+/重生之我靠回城变强 - 游戏规则（中文版）.txt

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#e8f0da" />
+    <title>重生之我靠回城变强 · 奇幻卡牌桌游</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <link rel="icon" href="./assets/dice.svg" />
+  </head>
+  <body>
+    <div class="scenery" aria-hidden="true"></div>
+    <div id="dust" aria-hidden="true"></div>
+    <header>
+      <a class="brand" href="./" aria-label="重生之我靠回城变强 主菜单"
+        ><img src="./assets/dice.svg" alt="" /><span
+          >回城变强<small>REBORN · RESPAWN · REROLL</small></span
+        ></a
+      >
+      <nav>
+        <button data-do="atlas">
+          <i data-icon="cards"></i><span>卡牌图鉴</span></button
+        ><button data-do="rules">
+          <i data-icon="book"></i><span>游戏规则</span></button
+        ><span class="nav-line"></span
+        ><button
+          class="utility"
+          data-do="sound"
+          title="切换音效"
+          aria-label="切换音效"
+        >
+          <i data-icon="sound"></i></button
+        ><button
+          class="utility"
+          data-do="fullscreen"
+          title="全屏"
+          aria-label="切换全屏"
+        >
+          <i data-icon="expand"></i>
+        </button>
+      </nav>
+    </header>
+    <main id="app"></main>
+    <div id="overlay"></div>
+    <div id="transition" aria-hidden="true"><div>穿越时空</div></div>
+    <div id="notice" role="status" aria-live="polite"></div>
+    <script type="module" src="./app.mjs"></script>
+  </body>
+</html>
