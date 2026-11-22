@@ -1,5 +1,5 @@
 import { cards } from "./cards.mjs";
-import { newGame, act, view } from "./game.mjs";
+import { newGame, restoreGame, act, view } from "./game.mjs";
 import {
   esc,
   icon,
@@ -56,6 +56,7 @@ let snapshot = "",
   noticeTimer,
   animToken = 0,
   animating = false,
+  diceAnimation = null,
   previousFocus = null,
   atlasFilter = "",
   modalName = "",
@@ -442,7 +443,8 @@ function soloStart(reset = false) {
   const roster = [
     { id: "solo", name: profile.name, color: profile.color, online: true },
   ];
-  soloState = (!reset && store.get("solo")) || newGame(roster);
+  const saved = !reset && store.get("solo");
+  soloState = saved ? restoreGame(saved) : newGame(roster);
   store.set("solo", soloState);
   close();
   setRoom({
@@ -492,29 +494,19 @@ function setRoom(next) {
     animating = false;
     if (next.game) travel();
   }
-  const changed =
-    old?.game && next.game && next.id === old.id
-      ? next.game.players.find((p) =>
-          old.game.players.some((q) => q.id === p.id && q.pos !== p.pos),
-        )
-      : null;
-  if (!animating) renderRoom();
-  if (changed && !reduced) {
-    const prev = old.game.players.find((p) => p.id === changed.id);
-    cameraMove(next.game, changed, prev.pos);
-  }
+  const sameGame = old?.game && next.game && next.id === old.id;
+  const moves =
+    sameGame && next.game.movementSequence > old.game.movementSequence
+      ? next.game.movements
+      : [];
   if (
-    next.game?.dice &&
-    old?.game &&
-    !reduced &&
-    JSON.stringify(next.game.dice) !== JSON.stringify(old.game.dice)
-  ) {
-    const die = document.createElement("div");
-    die.className = "dice-pop";
-    die.textContent = "⚄　" + next.game.dice.total;
-    document.body.append(die);
-    setTimeout(() => die.remove(), 900);
-  }
+    sameGame &&
+    next.game.dice?.rollId &&
+    next.game.dice.rollId !== old.game.dice?.rollId
+  )
+    animateDice(next.game.dice);
+  if (!animating) renderRoom();
+  if (moves.length && !reduced) cameraMove(next.game, moves);
   if (
     next.game &&
     old?.game &&
@@ -552,7 +544,59 @@ function setRoom(next) {
     tone(160);
   }
 }
-async function cameraMove(g, player, from) {
+function animateDice(dice) {
+  diceAnimation?.();
+  if (reduced) return;
+  const panel = document.createElement("div");
+  panel.className = "dice-animation";
+  panel.setAttribute("aria-hidden", "true");
+  panel.innerHTML = '<div class="rolling-faces"></div><b></b>';
+  const heading = panel.querySelector("b");
+  const faces = panel.querySelector(".rolling-faces");
+  const visible = dice.values.slice(0, 8);
+  const glyphs = "⚀⚁⚂⚃⚄⚅";
+  const diceElements = visible.map(() => document.createElement("span"));
+  faces.append(...diceElements);
+  const show = (values) => {
+    values.forEach((n, i) => {
+      diceElements[i].textContent = glyphs[n - 1];
+    });
+  };
+  show(visible.map(() => 1));
+  heading.textContent = dice.label + " · 掷骰中";
+  app.classList.add("rolling-dice");
+  document.body.append(panel);
+  let face = 1;
+  const rolling = setInterval(() => {
+    show(visible.map((_, i) => 1 + ((face + i) % 6)));
+    face++;
+  }, 75);
+  const reveal = setTimeout(() => {
+    clearInterval(rolling);
+    show(visible);
+    heading.textContent = dice.label + " · " + dice.total;
+    panel.classList.add("revealed");
+    app.classList.remove("rolling-dice");
+    if (
+      room?.game?.actor === room?.you &&
+      document.activeElement === document.body
+    )
+      $(
+        ".actions [data-action^='confirm'], .actions [data-action='check:accept']",
+      )?.focus({ preventScroll: true });
+  }, 740);
+  const dismiss = setTimeout(() => diceAnimation?.(), 1450);
+  diceAnimation = () => {
+    clearInterval(rolling);
+    clearTimeout(reveal);
+    clearTimeout(dismiss);
+    panel.remove();
+    app.classList.remove("rolling-dice");
+    diceAnimation = null;
+  };
+}
+
+async function cameraMove(g, moves) {
   const tag = ++animToken;
   animating = true;
   const stage = $(".stage");
@@ -562,13 +606,11 @@ async function cameraMove(g, player, from) {
   }
   const drawPlayers = g.players.map((p) => ({
     ...p,
-    pos: p.id === player.id ? from : p.pos,
+    pos: moves.find(({ id }) => id === p.id)?.from ?? p.pos,
   }));
   stage.innerHTML = board({ ...g, players: drawPlayers });
   const world = stage.firstElementChild;
-  const diff = player.pos - from,
-    steps = Math.min(12, Math.abs(diff)),
-    pause = (ms) => new Promise((r) => setTimeout(r, ms));
+  const pause = (ms) => new Promise((r) => setTimeout(r, ms));
   function aim(pos) {
     const cell = world.querySelector('[data-tile="' + pos + '"]');
     if (!cell) return;
@@ -592,26 +634,29 @@ async function cameraMove(g, player, from) {
     world.style.transform =
       "translate(" + x + "px," + y + "px) scale(" + scale + ")";
   }
-  world.style.transition = "transform .22s ease-out";
-  aim(from);
-  await pause(180);
-  for (let i = 1; i <= steps; i++) {
-    if (tag !== animToken) return;
-    const p = drawPlayers.find((x) => x.id === player.id),
-      old = p.pos;
-    p.pos = from + Math.round((diff * i) / steps);
-    for (const n of [old, p.pos]) {
-      const cell = world.querySelector('[data-tile="' + n + '"]'),
-        on = drawPlayers.filter((x) => x.pos === n);
-      cell.querySelector(".pawns").outerHTML = pawns(on);
-      cell.classList.toggle("occupied", !!on.length);
+  world.style.transition = "transform .32s ease-in-out";
+  aim(moves[0].from);
+  await pause(340);
+  for (const { id, from, to, stepwise } of moves) {
+    const p = drawPlayers.find((player) => player.id === id);
+    const steps = stepwise ? Math.min(12, Math.abs(to - from)) : 1;
+    for (let i = 1; i <= steps; i++) {
+      if (tag !== animToken) return;
+      const old = p.pos;
+      p.pos = from + Math.round(((to - from) * i) / steps);
+      for (const n of [old, p.pos]) {
+        const cell = world.querySelector('[data-tile="' + n + '"]'),
+          on = drawPlayers.filter((x) => x.pos === n);
+        cell.querySelector(".pawns").outerHTML = pawns(on);
+        cell.classList.toggle("occupied", !!on.length);
+      }
+      aim(p.pos);
+      await pause(stepwise ? 345 : 500);
     }
-    aim(p.pos);
-    await pause(125);
   }
   if (tag !== animToken) return;
   world.style.transform = "none";
-  await pause(220);
+  await pause(330);
   if (tag === animToken) {
     animating = false;
     renderRoom();
@@ -621,6 +666,7 @@ function returnMenu(clear = false) {
   version++;
   animToken++;
   animating = false;
+  diceAnimation?.();
   soloState = null;
   room = null;
   if (clear) {
@@ -781,6 +827,7 @@ async function click(e) {
       );
       return;
     }
+    if (d.action && app.classList.contains("rolling-dice")) return;
     if (d.action && room?.game?.phase === "offer" && !overlay.firstChild) {
       const offer = room.game.actions.find((a) => a.id === d.action);
       if (offer?.card) {
@@ -790,6 +837,7 @@ async function click(e) {
     }
     if (d.action) {
       if (!busy && !animating) {
+        diceAnimation?.();
         tone(495);
         close();
         await request("action", {
@@ -874,7 +922,7 @@ async function click(e) {
                 "</span>",
             )
             .join("") +
-          "</div><p>路线按数字从 1 到 100 蛇形前进。每 25 格更换环境，带 ✦ 的格子触发当地地形效果。</p>",
+          "</div><p>路线按数字从 1 到 100 蛇形前进，每 25 格更换环境。平原无额外效果。落在沙漠后退 1 格，从雨林出发前须判定，落在火山失去 1 点生命。火山中的传说宝箱只提供传说装备。</p>",
       );
       return;
     }

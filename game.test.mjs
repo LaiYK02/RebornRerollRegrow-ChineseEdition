@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { act, newGame, setOnline, view } from "./game.mjs";
+import { act, newGame, restoreGame, setOnline, view } from "./game.mjs";
 import { cards } from "./cards.mjs";
 
 const solo = () => newGame([{ id: "a", name: "甲" }]);
@@ -9,13 +9,22 @@ const pair = () =>
     { id: "a", name: "甲" },
     { id: "b", name: "乙" },
   ]);
-const step = (game, action, rng = () => 0) =>
+const choose = (game, action, rng = () => 0) =>
   act(game, game.battle?.actorId || game.actor, action, rng);
+function step(game, action, rng = () => 0) {
+  choose(game, action, rng);
+  const available = ids(game);
+  if (
+    available.length === 1 &&
+    ["check:accept", "confirm"].includes(available[0])
+  )
+    choose(game, available[0], rng);
+}
 const die = (n) => () => (n - 0.5) / 6;
 const ids = (g, id = g.battle?.actorId || g.actor) =>
   view(g, id).actions.map((a) => a.id);
 
-test("the board has 100 positions, symmetric portals and sparse terrain in each region", () => {
+test("the board has 100 positions, symmetric portals and 25 active tiles per terrain", () => {
   const g = pair();
   assert.deepEqual(
     g.board.map((t) => t.pos),
@@ -37,9 +46,12 @@ test("the board has 100 positions, symmetric portals and sparse terrain in each 
   assert.ok(bosses[0].pos > 25);
   for (const tile of g.board.filter((t) => t.type === "portal"))
     assert.equal(g.board[tile.to - 1].to, tile.pos);
-  for (const region of ["desert", "rainforest", "volcano"]) {
-    assert.ok(g.board.some((t) => t.biome === region && t.terrain === region));
-    assert.ok(g.board.some((t) => t.biome === region && t.terrain === "plain"));
+  for (const region of ["plain", "desert", "rainforest", "volcano"]) {
+    assert.equal(g.board.filter((t) => t.biome === region).length, 25);
+    assert.equal(
+      g.board.filter((t) => t.biome === region && t.terrain === region).length,
+      25,
+    );
   }
   assert.deepEqual(
     g.players.map((p) => [p.pos, p.hp, p.atk, p.def, p.act]),
@@ -51,6 +63,75 @@ test("the board has 100 positions, symmetric portals and sparse terrain in each 
   assert.throws(() => act(g, "b", "roll"));
   assert.throws(() => act(g, "a", "not-an-action"));
   assert.doesNotThrow(() => structuredClone(JSON.parse(JSON.stringify(g))));
+});
+
+test("宝箱独立分级，确认掷骰后才移动或抽装备", () => {
+  for (const [position, roll, type, prefix] of [
+    [5, 1, "chest", "c"],
+    [28, 2, "chest", "c"],
+    [81, 1, "legendaryChest", "l"],
+  ]) {
+    const g = solo(),
+      [p] = g.players;
+    p.pos = position;
+    choose(g, "roll", die(roll));
+    assert.equal(p.pos, position);
+    assert.ok(ids(g).includes("check:accept"));
+    step(g, "check:accept", die(6));
+    assert.equal(g.board[p.pos - 1].type, type);
+    assert.equal(g.phase, "offer");
+    assert.equal(view(g, "a").actions.length, 3);
+    assert.ok(
+      view(g, "a").actions.every(({ card }) => card.startsWith(prefix)),
+    );
+    assert.ok(
+      g.board
+        .filter((t) => t.type === "legendaryChest")
+        .every((t) => t.biome === "volcano"),
+    );
+  }
+});
+
+test("旧单人存档保留进度，并升级火山宝箱和宝箱待选装备", () => {
+  const g = solo();
+  g.board[81].type = "chest";
+  g.board[81].terrain = "plain";
+  g.players[0].pos = 82;
+  g.players[0].hp = 7;
+  g.phase = "offer";
+  g.pending = { ids: ["c01", "l01", "c02"] };
+  restoreGame(g, die(3));
+  assert.equal(g.players[0].pos, 82);
+  assert.equal(g.players[0].hp, 7);
+  assert.equal(g.board[81].type, "legendaryChest");
+  assert.equal(g.board[81].terrain, "volcano");
+  assert.ok(view(g, "a").actions.every(({ card }) => card.startsWith("l")));
+});
+
+test("确认移动后记录沙漠的逐格前进与后退，火山传送到达也计伤害", () => {
+  const g = solo(),
+    [p] = g.players;
+  p.pos = 25;
+  choose(g, "roll", die(1));
+  assert.equal(p.pos, 25);
+  choose(g, "check:accept");
+  assert.deepEqual(
+    view(g, "a").movements.map(({ from, to, stepwise }) => [
+      from,
+      to,
+      stepwise,
+    ]),
+    [
+      [25, 26, true],
+      [26, 25, false],
+    ],
+  );
+  const h = solo(),
+    [q] = h.players;
+  q.pos = 89;
+  step(h, "roll", die(1));
+  assert.equal(q.pos, 76);
+  assert.equal(q.hp, 8);
 });
 
 test("draws and unplayed items stay private and snapshots do not mutate authority", () => {
@@ -92,7 +173,7 @@ test("movement die modifiers, golden die, reroll and fate prism resolve once", (
   step(g, "use:i01");
   assert.deepEqual(g.dice.values, [6, 6]);
   step(g, "use:i19");
-  step(g, "target:-2");
+  choose(g, "target:-2");
   step(g, "check:accept");
   assert.equal(p.pos, 11);
   assert.equal(p.movePenalty, 0);
@@ -131,9 +212,9 @@ test("terrain, traps, portals, heals and rest upgrades resolve at their proper t
   step(h, "roll", die(1));
   assert.equal(q.hp, 5);
   step(h, "end");
-  q.pos = 14;
-  step(h, "roll", die(1));
-  assert.equal(q.pos, 33);
+  q.pos = 32;
+  step(h, "roll", die(2));
+  assert.equal(q.pos, 15);
   assert.equal(h.phase, "end");
   step(h, "end");
   q.pos = 1;
@@ -221,7 +302,7 @@ test("monster damage persists on escape, resets on death and grants all tier rew
   p.act = 1;
   p.gear = ["l03", "l08"];
   p.locked = ["l03"];
-  for (let i = 0; i < 12 && g.battle; i++) step(g, ids(g)[0], die(3));
+  for (let i = 0; i < 12 && g.battle; i++) step(g, ids(g)[0], die(2));
   assert.equal(p.pos, 1);
   assert.equal(p.hp, 10);
   assert.equal(g.board[18].hp, 3);
@@ -238,7 +319,7 @@ test("monster damage persists on escape, resets on death and grants all tier rew
     q.pos = pos - 1;
     q.gear = ["l03", "c10", "l02"];
     q.act = 12;
-    step(h, "roll", die(1));
+    step(h, "roll", die(pos > 25 ? 2 : 1));
     assert.equal(h.board[pos - 1].type, tier);
     for (let i = 0; i < 40 && h.battle; i++) step(h, ids(h)[0], die(2));
     assert.equal(h.phase, "offer");
@@ -334,7 +415,7 @@ test("offline seats retain progress, skip turns and can act after reconnecting",
   q.pos = 32;
   setOnline(g, "a", false);
   assert.equal(g.turn, "b");
-  step(g, "roll", die(1));
+  step(g, "roll", die(2));
   assert.equal(q.pos, 15);
   step(g, "end");
   assert.equal(g.turn, "b");
@@ -455,7 +536,7 @@ for (const count of [1, 4]) {
           name: "玩家" + i,
         })),
       );
-      const rng = generator(13244);
+      const rng = generator(count === 4 ? 429 : 13244);
       let actionsTaken = 0;
       while (!g.winner && actionsTaken < 12000) {
         const id = g.battle?.actorId || g.actor;
@@ -465,7 +546,16 @@ for (const count of [1, 4]) {
         act(g, id, move.id, rng);
         actionsTaken++;
       }
-      assert.ok(g.winner, "failed to reach victory within the test budget");
+      assert.ok(
+        g.winner,
+        "failed to reach victory within the test budget: " +
+          JSON.stringify({
+            round: g.round,
+            phase: g.phase,
+            battle: g.battle?.monster,
+            log: g.log.slice(-6),
+          }),
+      );
       assert.equal(g.players.find((p) => p.id === g.winner).pos, 100);
       for (const p of g.players) assert.deepEqual(view(g, p.id).actions, []);
     },

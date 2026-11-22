@@ -163,8 +163,9 @@ function sync(s) {
       : {
           binding: "选择要封印的怪物效果",
           attack: "选择攻击或使用道具",
+          attackReview: "确认攻击骰点，或使用道具调整",
           defend: "进行防御判定",
-          reaction: "查看双方骰点，可调整本次判定",
+          reaction: "确认本次判定，或使用道具调整",
           optional: "选择是否发动装备效果",
           equipmentCheck: "查看并确认装备判定",
         }[b.phase] || "战斗结算中";
@@ -329,7 +330,6 @@ function cantAttack(s, id) {
 
 function adjusted(s, id, dice, type) {
   const value = dice.reduce((sum, d) => sum + d, 0);
-  if (id === MONSTER) return value;
   const v = status(s, id);
   let mod = gearCount(s, id, "c03");
   if (type === "atk" || type === "def") {
@@ -345,6 +345,11 @@ function adjusted(s, id, dice, type) {
   const needsOdd = gearCount(s, id, "c08") && result % 2 === 0;
   if (needsEven || needsOdd) result++;
   return result;
+}
+
+export function recordDice(s, values, total, label, rolled = true) {
+  if (rolled) s.rollSequence = (s.rollSequence ?? 0) + 1;
+  s.dice = { values, total, label, rollId: s.rollSequence };
 }
 
 function makeRoll(s, id, type, count, rng, cannot = false) {
@@ -367,47 +372,52 @@ function makeRoll(s, id, type, count, rng, cannot = false) {
   };
   result.failed =
     cannot ||
-    (id !== MONSTER &&
-      effect(s, "b04.3") &&
-      dice.length > 1 &&
-      dice.every((n) => n === dice[0]));
+    (effect(s, "b04.3") && dice.length > 1 && dice.every((n) => n === dice[0]));
   delete v.extra;
-  s.dice = {
-    values: dice,
-    label: `${name(s, id)} · ${statNames[type] || "装备"}判定`,
-    total: result.total,
-  };
+  if (!cannot)
+    recordDice(
+      s,
+      dice,
+      result.total,
+      `${name(s, id)} · ${statNames[type] || "装备"}判定`,
+    );
   return result;
 }
 
 function rollFor(s, id, type, rng) {
+  const cannot = type === "def" && !!status(s, id).stun;
+  if (id === MONSTER) {
+    return {
+      id,
+      type,
+      dice: [],
+      total: cannot ? 0 : monsterStats(s)[type],
+      count: 0,
+      cannot,
+      failed: cannot,
+    };
+  }
   const count =
-    (id !== MONSTER && effect(s, "b07.1") ? 1 : stats(s, id)[type]) +
+    (effect(s, "b07.1") ? 1 : playerStats(s, id)[type]) +
     (status(s, id).extra || 0);
-  return makeRoll(
-    s,
-    id,
-    type,
-    count,
-    rng,
-    type === "def" && !!status(s, id).stun,
-  );
+  return makeRoll(s, id, type, count, rng, cannot);
 }
 
 function attackRoll(s, rng) {
   const b = s.battle;
   b.attackRoll = rollFor(s, b.side, "atk", rng);
   b.defenseRoll = null;
-  b.actorId = rival(b, b.side);
-  b.phase = "defend";
+  b.actorId = b.monster ? rival(b, b.side) : b.side;
+  b.phase = b.monster ? "defend" : "attackReview";
   b.flip = false;
   b.shock = false;
 }
 
 function defenseRoll(s, rng) {
   const b = s.battle;
-  b.defenseRoll = rollFor(s, rival(b, b.side), "def", rng);
-  b.reactors = [b.side, rival(b, b.side)].filter((id) => id !== MONSTER);
+  const defender = rival(b, b.side);
+  b.defenseRoll = rollFor(s, defender, "def", rng);
+  b.reactors = [b.side, defender].filter((id) => id !== MONSTER);
   b.phase = "reaction";
   b.actorId = b.reactors[0];
 }
@@ -566,14 +576,7 @@ function drive(s, rng) {
       } else attackRoll(s, rng);
     } else if (b.phase === "defend" && b.actorId === MONSTER)
       defenseRoll(s, rng);
-    else if (
-      b.phase === "reaction" &&
-      (!b.reactors.length || !reactionChoices(s, b.actorId).length)
-    ) {
-      if (b.reactors.length) b.reactors.shift();
-      if (!b.reactors.length) resolveStrike(s);
-      else b.actorId = b.reactors[0];
-    } else break;
+    else break;
   }
   sync(s);
 }
@@ -635,7 +638,10 @@ function reactionChoices(s, id) {
       : b.defenseRoll;
   if (!roll || roll.cannot) return choices;
   if (!equipment && b.side !== id && b.shock) return choices;
-  if (items.includes("i01"))
+  const pvpAttack = !b.monster && b.side === id;
+  if (pvpAttack && b.phase === "reaction")
+    return items.includes("i01") ? [itemChoice("i01", "反转命中结果")] : [];
+  if (items.includes("i01") && b.phase !== "attackReview")
     choices.push(
       itemChoice("i01", equipment ? "反转装备判定" : "反转命中结果"),
     );
@@ -764,6 +770,8 @@ export function battleActions(s, id) {
       action("confirmEquipment", "确认装备判定"),
       ...reactionChoices(s, id),
     ];
+  if (b.phase === "attackReview")
+    return [action("confirmAttack", "确认攻击判定"), ...reactionChoices(s, id)];
   if (b.phase === "reaction") {
     const { hit } = checkStrikes(s);
     return [
@@ -867,11 +875,7 @@ function useItem(s, id, card, arg, more, rng) {
     case "i19":
       roll.total += Number(arg);
       if (!equipment && id === b.side && roll.total % 2) b.shock = false;
-      s.dice = {
-        label: `${p.name} · 调运砝码`,
-        values: roll.dice,
-        total: roll.total,
-      };
+      recordDice(s, roll.dice, roll.total, `${p.name} · 调运砝码`, false);
       break;
   }
   if (["i07", "i12", "i13", "i14", "i15", "i16"].includes(card)) {
@@ -904,13 +908,14 @@ export function actBattle(s, id, actionId, rng = Math.random) {
   const [verb, card, arg, more] = actionId.split(":");
   if (verb === "use") {
     useItem(s, id, card, arg, more, rng);
-    if (b.phase === "equipmentCheck" && !reactionChoices(s, id).length)
-      finishEquipment(s, true);
   } else if (verb === "bind") {
     removeEffect(s, card);
     beginTurn(s);
   } else if (verb === "attack") attackRoll(s, rng);
-  else if (verb === "defend") defenseRoll(s, rng);
+  else if (verb === "confirmAttack") {
+    b.phase = "defend";
+    b.actorId = rival(b, id);
+  } else if (verb === "defend") defenseRoll(s, rng);
   else if (verb === "skip" || verb === "passOpening") endTurn(s);
   else if (verb === "shock") {
     b.shock = true;
@@ -930,7 +935,6 @@ export function actBattle(s, id, actionId, rng = Math.random) {
       rng,
     );
     b.phase = "equipmentCheck";
-    if (!reactionChoices(s, id).length) finishEquipment(s, true);
   } else if (verb === "confirmEquipment") finishEquipment(s, true);
   else if (verb === "pass") finishEquipment(s, false);
   drive(s, rng);

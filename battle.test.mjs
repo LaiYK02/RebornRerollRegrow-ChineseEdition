@@ -26,10 +26,61 @@ function encounter(monsterId, properties = {}, options = {}, rng = ones) {
   startBattle(s, { attackerId: "甲", monsterId, ...options }, rng);
   return s;
 }
-function play(s, id, rng = ones) {
+function choose(s, id, rng = ones) {
   return actBattle(s, s.battle.actorId, id, rng);
 }
+function play(s, id, rng = ones) {
+  let outcome = choose(s, id, rng);
+  while (
+    choices(s).length === 1 &&
+    ["confirm", "confirmAttack", "confirmEquipment"].includes(choices(s)[0])
+  )
+    outcome = choose(s, choices(s)[0], rng);
+  return outcome;
+}
 const choices = (s) => battleActions(s, s.battle.actorId).map((a) => a.id);
+
+test("怪物直接使用攻防值，玩家每次掷骰后都可确认", () => {
+  const s = encounter("n02");
+  choose(s, "attack", die(3));
+  assert.deepEqual(s.battle.defenseRoll.dice, []);
+  assert.equal(s.battle.defenseRoll.total, 2);
+  assert.equal(s.battle.hp, 1);
+  assert.deepEqual(choices(s), ["confirm"]);
+  play(s, "confirm");
+  assert.equal(s.battle.outcome.type, "monsterWin");
+
+  const t = encounter("e01");
+  choose(t, "attack", die(5));
+  play(t, "confirm");
+  assert.equal(t.battle.attackRoll.total, 3);
+  assert.deepEqual(t.battle.attackRoll.dice, []);
+  choose(t, "defend", die(2));
+  assert.equal(t.players[0].hp, 10);
+  assert.deepEqual(choices(t), ["confirm"]);
+  play(t, "confirm");
+  assert.equal(t.players[0].hp, 9);
+});
+
+test("决斗攻击骰确认后才轮到对手，重掷播放新骰点", () => {
+  const s = state(hero("甲", { items: ["i08"] }), hero("乙"));
+  startBattle(s, { attackerId: "甲", defenderId: "乙" });
+  choose(s, "attack", die(1));
+  const firstRoll = s.dice.rollId;
+  assert.deepEqual(choices(s), ["confirmAttack", "use:i08"]);
+  assert.deepEqual(battleActions(s, "乙"), []);
+  choose(s, "use:i08", die(5));
+  assert.equal(s.dice.rollId, firstRoll + 1);
+  assert.deepEqual(s.dice.values, [5]);
+  choose(s, "confirmAttack");
+  assert.equal(s.battle.actorId, "乙");
+  choose(s, "defend", die(3));
+  assert.equal(s.players[1].hp, 10);
+  choose(s, "confirm");
+  assert.equal(s.battle.actorId, "乙");
+  choose(s, "confirm");
+  assert.equal(s.players[1].hp, 9);
+});
 
 test("攻击骰与防御骰作差，成功仅扣 1 生命；攻击次数等于行动点", () => {
   const s = encounter("e01", { atk: 7, act: 3 });
@@ -127,7 +178,7 @@ test("暴怒受攻击蓄力，攻击后清零；死亡反击可导致玩家战�
   const s = encounter("b03");
   assert.equal(s.battle.atk, 7);
   play(s, "attack");
-  assert.equal(s.battle.attackRoll.count, 9);
+  assert.equal(s.battle.attackRoll.total, 9);
   play(s, "defend");
   assert.equal(s.battle.atk, 8);
   const mutual = encounter("b03", { hp: 3, atk: 4 }, { monsterHp: 1 });
@@ -260,8 +311,8 @@ test("震魂锤令对方无法防御攻击，强驱散可在对方下一攻击�
   );
   startBattle(s, { attackerId: "甲", defenderId: "乙" });
   play(s, "attack");
-  play(s, "defend");
   play(s, "shock");
+  play(s, "defend");
   assert.equal(s.players[1].hp, 9);
   assert.ok(choices(s).includes("skip"));
   assert.ok(!choices(s).includes("use:i14:self:stun"));
@@ -364,6 +415,5 @@ test("最终头目取值早于头目交换效果，并区分最终胜利与一�
   assert.ok(s.battle.active.includes("b04.1"));
   assert.deepEqual(s.battle.base, { atk: 15, def: 3 });
   // 奇数差值避开本次抽到的贪婪免疫。
-  const rolls = [0.72, 0.2];
-  assert.equal(play(s, "attack", () => rolls.shift()).type, "victory");
+  assert.equal(play(s, "attack", die(4)).type, "victory");
 });

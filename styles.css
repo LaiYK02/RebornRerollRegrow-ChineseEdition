@@ -1597,37 +1597,57 @@ body {
 .hud .gearline .slot:not(.empty) {
   border-color: #91733f;
 }
-.dice-pop {
+.dice-animation {
   position: fixed;
   z-index: 13;
   pointer-events: none;
   left: 50%;
-  top: 62%;
+  top: 50%;
+  transform: translate(-50%, -50%);
   color: #263932;
   background: #ffe29b;
   border: 2px solid #455443;
   border-radius: 10px;
   box-shadow: 0 4px 0 #495343;
-  padding: 6px 13px;
+  padding: 9px 17px;
   font-weight: 900;
-  animation: dice-pop 0.85s both;
+  text-align: center;
+  width: max-content;
+  max-width: 94vw;
 }
-@keyframes dice-pop {
-  0% {
-    opacity: 0;
-    transform: translate(-50%, 10px) rotate(-9deg) scale(0.8);
+.rolling-faces {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  font-size: clamp(26px, 6vw, 56px);
+  line-height: 1;
+  padding-bottom: 5px;
+}
+.dice-animation:not(.revealed) .rolling-faces span {
+  animation: tumble-die 0.36s ease-in-out alternate infinite;
+}
+@keyframes tumble-die {
+  from {
+    transform: translateY(5px) rotate(-32deg);
   }
-  25% {
-    opacity: 1;
-    transform: translate(-50%, 0) rotate(1deg) scale(1.1);
+  to {
+    transform: translateY(-7px) rotate(35deg);
   }
-  75% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 0;
-    transform: translate(-50%, -16px);
-  }
+}
+.rolling-dice .actions,
+.rolling-dice .battle-rolls {
+  visibility: hidden;
+}
+.board {
+  position: relative;
+}
+.tile.legendary-chest {
+  border: 2px solid #96498a;
+  background: #f4d1df;
+}
+.legendary-chest .terrain-dot {
+  color: #8d388c;
 }
 #transition:before,
 #transition:after {

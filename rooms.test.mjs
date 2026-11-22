@@ -171,6 +171,14 @@ test("the host can start solo and a stale or illegal action cannot advance the g
     [200, 409],
   );
   assert.equal((await request("state", { token })).room.revision, revision + 1);
+  const rolled = duplicate.find((response) => response.status === 200).room;
+  assert.equal(rolled.game.players[0].pos, 1);
+  assert.ok(rolled.game.dice.values.length);
+  const confirmed = await request("action", {
+    token,
+    body: { actionId: "check:accept", revision: rolled.revision },
+  });
+  assert.ok(confirmed.room.game.players[0].pos > 1);
   const restarted = await request("restart", { token, body: {} });
   assert.ok(restarted.room.revision > revision);
 });

@@ -1,5 +1,10 @@
 import { cards } from "./cards.mjs";
-import { startBattle, battleActions, actBattle } from "./battle.mjs";
+import {
+  startBattle,
+  battleActions,
+  actBattle,
+  recordDice,
+} from "./battle.mjs";
 
 const stats = { atk: "攻击", def: "防御", act: "行动" };
 const palette = ["#e76a51", "#35a89a", "#b18aef", "#e2af40"];
@@ -24,19 +29,20 @@ function log(game, message) {
 }
 
 function board() {
-  const result = Array.from({ length: 100 }, (_, i) => ({
-    pos: i + 1,
-    type: "plain",
-    biome: ["plain", "desert", "rainforest", "volcano"][Math.floor(i / 25)],
-    terrain: "plain",
-  }));
+  const result = Array.from({ length: 100 }, (_, i) => {
+    const biome = ["plain", "desert", "rainforest", "volcano"][
+      Math.floor(i / 25)
+    ];
+    return { pos: i + 1, type: "plain", biome, terrain: biome };
+  });
   const spaces = {
     start: [1],
     finish: [100],
     normal: [4, 9, 14, 22, 25, 27, 34, 41, 46, 53, 61, 71, 81],
     elite: [19, 38, 49, 64, 72, 84, 91, 94],
     boss: [32, 43, 54, 69, 78, 87, 98],
-    chest: [6, 17, 29, 39, 51, 62, 73, 82, 92],
+    chest: [6, 17, 29, 39, 51, 62, 73],
+    legendaryChest: [82, 92],
     item: [3, 12, 23, 31, 42, 52, 65, 75, 83, 93],
     rest: [8, 18, 26, 37, 48, 58, 68, 77, 88, 97],
     duel: [11, 24, 35, 47, 57, 67, 79, 89],
@@ -57,12 +63,47 @@ function board() {
     result[a - 1].to = b;
     result[b - 1].to = a;
   }
-  for (const pos of [
-    28, 36, 40, 44, 50, 55, 59, 63, 66, 70, 74, 80, 85, 86, 95, 96, 99,
-  ]) {
-    result[pos - 1].terrain = result[pos - 1].biome;
-  }
   return result;
+}
+
+export function restoreGame(game, rng = Math.random) {
+  let wasLegacyBoard = false;
+  for (const tile of game.board) {
+    wasLegacyBoard ||= tile.terrain !== tile.biome;
+    tile.terrain = tile.biome;
+    if (tile.type === "chest" && tile.biome === "volcano")
+      tile.type = "legendaryChest";
+  }
+  if (wasLegacyBoard && game.phase === "offer") {
+    const p = player(game);
+    const tile = tileAt(game, p);
+    if (tile.type === "chest" || tile.type === "legendaryChest") {
+      const tier = tile.type === "chest" ? "c" : "l";
+      if (game.pending.ids.some((id) => !id.startsWith(tier)))
+        offer(game, p, draw(game, tier, 3 + Number(equipped(p, "c14")), rng));
+    }
+  }
+  const b = game.battle;
+  if (b?.monster) {
+    for (const roll of [b.attackRoll, b.defenseRoll]) {
+      if (!roll || roll.id === b.first || !roll.dice.length) continue;
+      roll.dice = [];
+      roll.count = 0;
+      roll.total = roll.cannot ? 0 : b[roll.type];
+      if (b.phase === "reaction") {
+        const own = b.side === b.first ? b.attackRoll : b.defenseRoll;
+        if (own?.dice.length)
+          recordDice(
+            game,
+            own.dice,
+            own.total,
+            player(game, own.id).name + " · 战斗判定",
+            false,
+          );
+      }
+    }
+  }
+  return game;
 }
 
 export function newGame(roster) {
@@ -190,9 +231,11 @@ function removeGear(p, id) {
   syncBadge(p);
 }
 
-function relocate(game, p, position, death = false) {
+function relocate(game, p, position, death = false, stepwise = false) {
   const dest = Math.max(1, Math.min(100, position));
   const moved = p.pos !== dest;
+  if (moved)
+    (game.movements ??= []).push({ id: p.id, from: p.pos, to: dest, stepwise });
   p.pos = dest;
   p.arrived = ++game.sequence;
   if (moved && equipped(p, "l11")) capHP(p, 1);
@@ -224,9 +267,8 @@ function randomOne(array, rng) {
   return array[Math.min(array.length - 1, Math.floor(rng() * array.length))];
 }
 
-function draw(game, p, type, count, rng) {
-  const all = type === "equipment" ? [...pool("c"), ...pool("l")] : pool(type);
-  const options = all.flatMap((id) => {
+function draw(game, type, count, rng) {
+  const options = pool(type).flatMap((id) => {
     const stock = cards[id].copies ?? 1;
     const held = game.players.reduce((sum, q) => {
       const owned = (type === "i" ? q.items : q.gear).filter(
@@ -336,7 +378,7 @@ function settleBattle(game, outcome, rng) {
       game,
       p.name + " 击败怪物" + (tier === "normal" ? "。" : "，获得 1 技能点。"),
     );
-    offer(game, p, draw(game, p, reward, 1, rng));
+    offer(game, p, draw(game, reward, 1, rng));
   }
 }
 
@@ -371,16 +413,18 @@ function resolveSpace(game, p, rng) {
       return;
     }
     case "chest":
+    case "legendaryChest":
     case "item": {
       const isItem = tile.type === "item";
       const count = 3 + Number(equipped(p, isItem ? "c15" : "c14"));
-      offer(game, p, draw(game, p, isItem ? "i" : "equipment", count, rng));
+      const tier = isItem ? "i" : tile.type === "legendaryChest" ? "l" : "c";
+      offer(game, p, draw(game, tier, count, rng));
       return;
     }
     case "portal":
       relocate(game, p, tile.to);
       log(game, p.name + " 经传送门抵达第 " + p.pos + " 格。");
-      encounter(game, p, rng, true);
+      land(game, p, rng, true);
       return;
     case "rest":
       phase(game, "rest");
@@ -420,7 +464,7 @@ function encounter(game, p, rng, portal = false) {
     if (equipped(opponent, "c11")) {
       relocate(game, p, p.pos - 2);
       log(game, opponent.name + " 的逐客路障使 " + p.name + " 后退 2 格。");
-      afterEncounter(game, p, rng, false);
+      if (applyArrival(game, p)) afterEncounter(game, p, rng, false);
     } else {
       phase(
         game,
@@ -433,7 +477,7 @@ function encounter(game, p, rng, portal = false) {
   } else afterEncounter(game, p, rng, portal);
 }
 
-function land(game, p, rng) {
+function applyArrival(game, p) {
   const tile = tileAt(game, p);
   if (tile.banana) {
     delete tile.banana;
@@ -454,16 +498,22 @@ function land(game, p, rng) {
         log(game, p.name + " 使用凤凰之泪满血复活。");
       } else {
         respawn(game, p);
-        return;
+        return false;
       }
     }
   }
-  encounter(game, p, rng);
+  return true;
+}
+
+function land(game, p, rng, portal = false) {
+  const arrival = p.pos;
+  if (applyArrival(game, p))
+    encounter(game, p, rng, portal && p.pos === arrival);
 }
 
 const rollNames = { move: "移动", rain: "雨林", skirmish: "交锋" };
 
-function showRoll(game, p) {
+function showRoll(game, p, rolled = false) {
   const c = game.check;
   let total =
     c.values.reduce((sum, v) => sum + v, 0) +
@@ -473,11 +523,13 @@ function showRoll(game, p) {
   if (equipped(p, "c07") && Math.abs(total % 2) === 1) total++;
   if (equipped(p, "c08") && total % 2 === 0) total++;
   c.total = total;
-  game.dice = {
-    values: [...c.values],
+  recordDice(
+    game,
+    [...c.values],
     total,
-    label: p.name + " · " + rollNames[c.kind] + "判定",
-  };
+    p.name + " · " + rollNames[c.kind] + "判定",
+    rolled,
+  );
 }
 
 function finishRoll(game, p, rng) {
@@ -487,9 +539,14 @@ function finishRoll(game, p, rng) {
   log(game, p.name + " 的" + rollNames[c.kind] + "判定为 " + c.total + "。");
   if (c.kind === "rain") {
     if (Math.abs(c.total % 2) === 1) {
-      log(game, p.name + " 未能穿过雨林，跳过本回合。");
-      phase(game, "end");
-    } else phase(game, "move", { rainChecked: true });
+      if (game.phase === "landing") {
+        log(game, p.name + " 未能从雨林继续移动，结算当前格。");
+        resolveSpace(game, p, rng);
+      } else {
+        log(game, p.name + " 未能穿过雨林，跳过本回合。");
+        phase(game, "end");
+      }
+    } else phase(game, game.phase, { rainChecked: true });
   } else if (c.kind === "skirmish") {
     const match = game.pending;
     if (match.first === null) {
@@ -506,6 +563,7 @@ function finishRoll(game, p, rng) {
       );
       relocate(game, loser, loser.pos - 1);
       log(game, loser.name + " 交锋落败，后退 1 格。");
+      if (!applyArrival(game, loser)) return;
       afterEncounter(
         game,
         player(game, match.entrant),
@@ -519,7 +577,7 @@ function finishRoll(game, p, rng) {
       log(game, p.name + " 留在当前格。");
       phase(game, "end");
     } else {
-      relocate(game, p, p.pos + c.total);
+      relocate(game, p, p.pos + c.total, false, true);
       log(game, p.name + " 移动至第 " + p.pos + " 格。");
       land(game, p, rng);
     }
@@ -533,9 +591,7 @@ function rollCheck(game, p, kind, rng) {
   );
   game.check = { kind, values, weight: mods.weight || 0 };
   delete mods.face;
-  showRoll(game, p);
-  if (!p.items.some((id) => ["i01", "i08", "i19"].includes(id)))
-    finishRoll(game, p, rng);
+  showRoll(game, p, true);
 }
 
 function removeStatus(p, key) {
@@ -649,7 +705,7 @@ function useItem(game, p, id, rng) {
     case "i08": {
       const c = game.check;
       c.values = c.values.map(() => 1 + Math.floor(rng() * 6));
-      showRoll(game, p);
+      showRoll(game, p, true);
       break;
     }
     case "i09":
@@ -701,11 +757,7 @@ function boardItems(game, p) {
   );
   const canLeave =
     !p.statuses.some((s) => s.type === "slipped") &&
-    !(
-      game.phase === "move" &&
-      tileAt(game, p).terrain === "rainforest" &&
-      !game.pending.rainChecked
-    );
+    !(tileAt(game, p).terrain === "rainforest" && !game.pending.rainChecked);
   return unique(p.items).filter((id) => {
     if (id === "i18") return preRoll && !game.mods.face;
     if (id === "i09") return preRoll && !game.mods.extra;
@@ -745,7 +797,7 @@ function actions(game, id) {
       action("cancel", "取消"),
     ];
   if (game.check)
-    options = [action("check:accept", "采用判定 " + game.check.total)];
+    options = [action("check:accept", "确认判定 · " + game.check.total)];
   else
     switch (game.phase) {
       case "move": {
@@ -761,6 +813,13 @@ function actions(game, id) {
       }
       case "landing":
         options = [action("resolve", "结算当前格")];
+        if (
+          carried(p, "i05") &&
+          !slipped &&
+          tileAt(game, p).terrain === "rainforest" &&
+          !game.pending.rainChecked
+        )
+          options.push(action("roll", "投掷雨林判定 · 准备跨步"));
         break;
       case "end":
         options = [action("end", "结束回合")];
@@ -831,6 +890,7 @@ export function act(game, playerId, actionId, rng = Math.random) {
   if (!actions(game, playerId).some((a) => a.id === actionId))
     throw new Error("当前无法执行这个行动");
   const p = player(game, playerId);
+  game.movements = [];
   if (game.phase === "battle") {
     const outcome = actBattle(game, playerId, actionId, rng);
     game.players.forEach(syncBadge);
@@ -968,8 +1028,11 @@ function interruptOffline(game) {
   }
   if (game.phase === "skirmish") {
     const entrant = player(game, game.pending.entrant);
-    if (!entrant.online) phase(game, "end");
-    else if (!player(game, game.pending.incumbent).online) {
+    if (!entrant.online) {
+      game.check = null;
+      game.mods = {};
+      phase(game, "end");
+    } else if (!player(game, game.pending.incumbent).online) {
       game.check = null;
       game.mods = {};
       afterEncounter(game, entrant, Math.random, game.pending.portal);
@@ -1094,5 +1157,7 @@ export function view(game, id) {
     log: game.log.slice(-120),
     prompt: describe(game, id),
     dice: game.dice,
+    movementSequence: game.sequence,
+    movements: game.movements || [],
   });
 }

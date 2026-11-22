@@ -88,7 +88,8 @@ export const tiles = {
   normal: ["普通怪物", "skull", "#64774a"],
   elite: ["精英怪物", "skull", "#895c9b"],
   boss: ["七宗罪头目", "crown", "#ad4c44"],
-  chest: ["宝箱", "chest", "#997122"],
+  chest: ["普通宝箱", "chest", "#997122"],
+  legendaryChest: ["传说宝箱", "chest", "#8d388c"],
   item: ["道具", "item", "#397e99"],
   portal: ["传送门", "portal", "#7259a8"],
   rest: ["休息", "rest", "#ac7837"],
@@ -363,6 +364,7 @@ const tilePictures = {
   elite: "elite",
   boss: "crown",
   chest: "chest",
+  legendaryChest: "chest",
   item: "item",
   portal: "gate",
   rest: "camp",
@@ -376,7 +378,6 @@ export function board(g) {
         const region = regions.find((r) => r[0] === t.biome) || regions[0];
         const kind = tiles[t.type] || tiles.plain;
         const residents = g.players.filter((p) => p.pos === i + 1);
-        const special = t.terrain && t.terrain !== "plain";
         const reverse = Math.floor(i / 10) % 2;
         const label =
           i +
@@ -385,7 +386,6 @@ export function board(g) {
           region[1] +
           " · " +
           kind[0] +
-          (special ? " · 特殊地形" : "") +
           (t.boss ? " · " + cards[t.boss].name : "");
         const pic = tilePictures[t.type] || t.biome;
         const style =
@@ -401,6 +401,7 @@ export function board(g) {
           '<button class="tile ' +
           (residents.length ? "occupied " : "") +
           (t.type === "plain" ? "road" : "site") +
+          (t.type === "legendaryChest" ? " legendary-chest" : "") +
           '" data-tile="' +
           (i + 1) +
           '" style="' +
@@ -415,7 +416,9 @@ export function board(g) {
           pic +
           '.jpg">' +
           (t.type !== "plain" ? '<i class="type-dot"></i>' : "") +
-          (special ? '<span class="terrain-dot">✦</span>' : "") +
+          (t.type === "legendaryChest"
+            ? '<span class="terrain-dot" aria-hidden="true">✦</span>'
+            : "") +
           pawns(residents) +
           "</button>"
         );
