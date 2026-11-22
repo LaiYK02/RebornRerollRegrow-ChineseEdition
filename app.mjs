@@ -14,6 +14,7 @@ import {
   game,
   board,
   pawns,
+  parityLabel,
 } from "./assets/ui.mjs";
 
 const $ = (s) => document.querySelector(s);
@@ -57,6 +58,8 @@ let snapshot = "",
   animToken = 0,
   animating = false,
   diceAnimation = null,
+  reminderTimer,
+  reminderKey = "",
   previousFocus = null,
   atlasFilter = "",
   modalName = "",
@@ -191,7 +194,7 @@ function atlas(filter = "全部") {
     "atlas",
   );
 }
-function detail(id, back = false) {
+function detail(id, back = false, actionId) {
   const c =
     cards[id] ||
     (id === "knight"
@@ -206,7 +209,9 @@ function detail(id, back = false) {
         }
       : null);
   if (!c) return;
-  const actions = (room?.game?.actions || []).filter((a) => a.card === id);
+  const actions = (room?.game?.actions || []).filter(
+    (a) => a.card === id && (!actionId || a.id === actionId),
+  );
   modal(
     c.name,
     '<div class="entry-detail">' +
@@ -507,6 +512,7 @@ function setRoom(next) {
     animateDice(next.game.dice);
   if (!animating) renderRoom();
   if (moves.length && !reduced) cameraMove(next.game, moves);
+  scheduleTurnReminder(next);
   if (
     next.game &&
     old?.game &&
@@ -544,6 +550,33 @@ function setRoom(next) {
     tone(160);
   }
 }
+
+function scheduleTurnReminder(next) {
+  const actor = next?.game?.actor;
+  const key =
+    actor &&
+    !next.game.winner &&
+    next.game.players.some((p) => p.id === actor && p.online)
+      ? next.id + ":" + next.revision + ":" + actor
+      : "";
+  if (reminderKey === key) return;
+  reminderKey = key;
+  clearTimeout(reminderTimer);
+  app.querySelector(".turn-reminder")?.classList.remove("turn-reminder");
+  if (!key) return;
+  const remind = () => {
+    if (animating || busy || app.classList.contains("rolling-dice")) {
+      reminderTimer = setTimeout(remind, 500);
+      return;
+    }
+    const card = [...app.querySelectorAll("[data-player]")].find(
+      (el) => el.dataset.player === actor,
+    );
+    if (card) card.classList.add("turn-reminder");
+  };
+  reminderTimer = setTimeout(remind, 3000);
+}
+
 function animateDice(dice) {
   diceAnimation?.();
   if (reduced) return;
@@ -574,7 +607,8 @@ function animateDice(dice) {
   const reveal = setTimeout(() => {
     clearInterval(rolling);
     show(visible);
-    heading.textContent = dice.label + " · " + dice.total;
+    heading.textContent =
+      dice.label + " · " + dice.total + parityLabel(dice.parity);
     panel.classList.add("revealed");
     app.classList.remove("rolling-dice");
     if (
@@ -667,6 +701,7 @@ function returnMenu(clear = false) {
   animToken++;
   animating = false;
   diceAnimation?.();
+  scheduleTurnReminder(null);
   soloState = null;
   room = null;
   if (clear) {
@@ -809,6 +844,7 @@ async function click(e) {
           (t.terrain !== "plain" ? " · 触发特殊地形" : "") +
           (t.to ? " · 通往第 " + t.to + " 格" : "") +
           "</p>" +
+          (t.banana ? "<p>这里放置了香蕉皮，经过的玩家会停在此格。</p>" : "") +
           (t.monster
             ? button(
                 "openMonster",
@@ -828,10 +864,15 @@ async function click(e) {
       return;
     }
     if (d.action && app.classList.contains("rolling-dice")) return;
-    if (d.action && room?.game?.phase === "offer" && !overlay.firstChild) {
+    if (
+      d.action &&
+      ["offer", "replace", "deathDiscard"].includes(room?.game?.phase) &&
+      !overlay.firstChild &&
+      !animating
+    ) {
       const offer = room.game.actions.find((a) => a.id === d.action);
       if (offer?.card) {
-        detail(offer.card);
+        detail(offer.card, false, offer.id);
         return;
       }
     }

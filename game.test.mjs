@@ -24,6 +24,79 @@ const die = (n) => () => (n - 0.5) / 6;
 const ids = (g, id = g.battle?.actorId || g.actor) =>
   view(g, id).actions.map((a) => a.id);
 
+test("跨步符可直接离开雨林，香蕉皮截停确认后的移动并结算落点", () => {
+  const g = solo(),
+    [p] = g.players;
+  p.pos = 55;
+  p.items = ["i05"];
+  choose(g, "use:i05");
+  assert.equal(p.pos, 56);
+  assert.equal(g.check, null);
+  const h = solo(),
+    [q] = h.players;
+  q.pos = 2;
+  h.board[5].banana = true;
+  h.board[7].banana = true;
+  choose(h, "roll", die(6));
+  assert.equal(q.pos, 2);
+  choose(h, "check:accept");
+  assert.equal(q.pos, 6);
+  assert.equal(h.phase, "offer");
+  assert.equal(h.board[5].banana, undefined);
+  assert.equal(h.board[7].banana, true);
+  assert.deepEqual(q.statuses, []);
+});
+
+test("沙漠同格先交锋，只由挑战者结算落点", () => {
+  const g = pair(),
+    [p, q] = g.players;
+  p.pos = 28;
+  q.pos = 30;
+  step(g, "roll", die(2));
+  assert.equal(g.phase, "skirmish");
+  assert.deepEqual([p.pos, q.pos], [30, 30]);
+  step(g, "clash", die(6));
+  step(g, "clash", die(2));
+  assert.deepEqual([p.pos, q.pos], [29, 29]);
+  assert.equal(g.actor, p.id);
+  assert.equal(g.phase, "offer");
+});
+
+test("奇偶符只替换判定奇偶，移动仍使用原点数", () => {
+  const g = solo(),
+    [p] = g.players;
+  p.gear = ["c07"];
+  choose(g, "roll", die(3));
+  assert.equal(g.dice.total, 3);
+  assert.equal(g.dice.parity, "even");
+  choose(g, "check:accept");
+  assert.equal(p.pos, 4);
+});
+
+test("挑战者交锋落败或被装备推开时，结算退到的格子", () => {
+  const g = pair(),
+    [entrant, incumbent] = g.players;
+  entrant.pos = 6;
+  incumbent.pos = 7;
+  step(g, "roll", die(1));
+  step(g, "clash", die(1));
+  step(g, "clash", die(6));
+  assert.equal(entrant.pos, 6);
+  assert.equal(g.phase, "offer");
+  assert.deepEqual(ids(g, incumbent.id), []);
+
+  const h = pair(),
+    [challenger, defender] = h.players;
+  challenger.pos = 7;
+  defender.pos = 8;
+  defender.gear = ["c11"];
+  step(h, "roll", die(1));
+  assert.equal(challenger.pos, 6);
+  assert.equal(defender.pos, 8);
+  assert.equal(h.phase, "offer");
+  assert.deepEqual(ids(h, defender.id), []);
+});
+
 test("the board has 100 positions, symmetric portals and 25 active tiles per terrain", () => {
   const g = pair();
   assert.deepEqual(
@@ -167,7 +240,7 @@ test("movement die modifiers, golden die, reroll and fate prism resolve once", (
   step(g, "target:5");
   step(g, "roll", die(2));
   assert.deepEqual(g.dice.values, [5, 2]);
-  assert.equal(g.dice.total, 8);
+  assert.equal(g.dice.total, 7);
   step(g, "use:i08", die(1));
   assert.deepEqual(g.dice.values, [1, 1]);
   step(g, "use:i01");
@@ -220,10 +293,11 @@ test("terrain, traps, portals, heals and rest upgrades resolve at their proper t
   q.pos = 1;
   h.board[1].banana = true;
   step(h, "roll", die(1));
-  assert.ok(q.statuses.some((x) => x.type === "slipped"));
+  assert.equal(q.pos, 2);
+  assert.equal(h.board[1].banana, undefined);
   step(h, "end");
   step(h, "roll", die(6));
-  assert.equal(q.pos, 2);
+  assert.equal(q.pos, 8);
   assert.deepEqual(q.statuses, []);
 });
 
@@ -506,7 +580,8 @@ function chooseAdventureAction(g, snapshot) {
   }
   if (g.phase === "offer" || g.phase === "loot")
     return [...options].sort((a, b) => score(b) - score(a))[0];
-  const improve = p.act >= p.atk + 1 ? "atk" : "act";
+  const improve =
+    p.def < Math.min(4, p.atk) ? "def" : p.act >= p.atk + 1 ? "atk" : "act";
   const priority = [
     "challenge",
     ...(p.hp < 9 ? ["heal", "use:i02"] : []),
@@ -536,7 +611,7 @@ for (const count of [1, 4]) {
           name: "玩家" + i,
         })),
       );
-      const rng = generator(count === 4 ? 429 : 13244);
+      const rng = generator(13244);
       let actionsTaken = 0;
       while (!g.winner && actionsTaken < 12000) {
         const id = g.battle?.actorId || g.actor;

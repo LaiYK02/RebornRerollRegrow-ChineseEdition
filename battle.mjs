@@ -1,4 +1,4 @@
-import { cards } from "./cards.mjs";
+import { cards, monsterProfile } from "./cards.mjs";
 
 const MONSTER = "$monster";
 const statNames = { atk: "攻击", def: "防御", act: "行动" };
@@ -91,7 +91,7 @@ function removeEffect(s, key) {
   const b = s.battle;
   b.active = b.active.filter((entry) => entry !== key);
   if (key === "e05.1") {
-    b.maxHp = cards.e05.hp;
+    b.maxHp = monsterProfile("e05", b.biome).hp;
     b.hp = Math.min(b.hp, b.maxHp);
   }
   if (key === "b02.1") delete status(s, b.first).envy;
@@ -179,12 +179,13 @@ function sync(s) {
 
 export function startBattle(
   s,
-  { attackerId, defenderId, monsterId, monsterHp, monsterState },
+  { attackerId, defenderId, monsterId, monsterHp, monsterState, biome },
   rng = Math.random,
 ) {
   const form = monsterState?.form || monsterId;
   const b = (s.battle = {
     monster: monsterId || null,
+    biome,
     form: form || null,
     first: attackerId,
     second: defenderId || MONSTER,
@@ -213,7 +214,7 @@ export function startBattle(
       chalice: 0,
     };
   if (monsterId) {
-    const card = cards[form];
+    const card = monsterProfile(form, biome);
     const p = playerStats(s, attackerId);
     b.base =
       form === "final"
@@ -237,6 +238,50 @@ export function startBattle(
   if (b.phase === "start") beginTurn(s);
   drive(s, rng);
   return b;
+}
+
+export function restoreBattleRules(s, biome) {
+  const b = s.battle;
+  if (b.monster && b.form !== "final") {
+    const profile = monsterProfile(b.form, biome);
+    b.biome = biome;
+    b.base = { atk: profile.atk, def: profile.def };
+    const maxHp = profile.hp + (effect(s, "e05.1") ? 5 : 0);
+    if (b.hp > 0) b.hp += maxHp - b.maxHp;
+    b.maxHp = maxHp;
+  }
+  sync(s);
+  for (const roll of [b.attackRoll, b.defenseRoll, b.equipmentRoll]) {
+    if (!roll || roll.cannot) continue;
+    if (roll.id === MONSTER) {
+      roll.total = b[roll.type];
+      continue;
+    }
+    const parity = rollParity(s, roll.id);
+    if (!parity || roll.parity) continue;
+    if (parityOf(adjusted(s, roll.id, roll.dice, roll.type)) !== parity)
+      roll.total--;
+    roll.parity = parity;
+  }
+  const activeRoll =
+    b.phase === "equipmentCheck"
+      ? b.equipmentRoll
+      : b.phase === "reaction"
+        ? b.actorId === b.side
+          ? b.attackRoll
+          : b.defenseRoll
+        : b.phase === "attackReview"
+          ? b.attackRoll
+          : null;
+  if (activeRoll?.dice.length)
+    recordDice(
+      s,
+      activeRoll.dice,
+      activeRoll.total,
+      s.dice?.label ?? "战斗判定",
+      false,
+      activeRoll.parity,
+    );
 }
 
 function beginTurn(s) {
@@ -292,8 +337,13 @@ function checkEnd(s) {
       b.base = { atk: cards.n01.atk, def: cards.n01.def };
       b.active = [];
       b.maxHp = b.hp = cards.n01.hp;
-      b.fighters[MONSTER].status = {};
-      log(s, `分裂的普通史莱姆登场，剩余 ${b.slimes} 只。`);
+      b.nextSlime = true;
+      log(
+        s,
+        b.slimes === 2
+          ? "两只史莱姆分裂登场，先攻击左边。"
+          : "左边的史莱姆已击败，接下来攻击右边。",
+      );
     } else
       setOutcome(s, {
         ...common,
@@ -340,16 +390,21 @@ function adjusted(s, id, dice, type) {
         ? 2 * gearCount(s, id, "c01") + offset - (v.sloth || 0)
         : 2 * gearCount(s, id, "c02") + 3 * gearCount(s, id, "l05") - offset;
   }
-  let result = value + mod;
-  const needsEven = gearCount(s, id, "c07") && Math.abs(result % 2) === 1;
-  const needsOdd = gearCount(s, id, "c08") && result % 2 === 0;
-  if (needsEven || needsOdd) result++;
-  return result;
+  return value + mod;
 }
 
-export function recordDice(s, values, total, label, rolled = true) {
+export function parityOf(total, override) {
+  return override ?? (total % 2 === 0 ? "even" : "odd");
+}
+
+function rollParity(s, id) {
+  if (gearCount(s, id, "c07")) return "even";
+  if (gearCount(s, id, "c08")) return "odd";
+}
+
+export function recordDice(s, values, total, label, rolled = true, parity) {
   if (rolled) s.rollSequence = (s.rollSequence ?? 0) + 1;
-  s.dice = { values, total, label, rollId: s.rollSequence };
+  s.dice = { values, total, label, rollId: s.rollSequence, parity };
 }
 
 function makeRoll(s, id, type, count, rng, cannot = false) {
@@ -369,6 +424,7 @@ function makeRoll(s, id, type, count, rng, cannot = false) {
     total: cannot ? 0 : adjusted(s, id, dice, type),
     count,
     cannot,
+    parity: rollParity(s, id),
   };
   result.failed =
     cannot ||
@@ -380,6 +436,8 @@ function makeRoll(s, id, type, count, rng, cannot = false) {
       dice,
       result.total,
       `${name(s, id)} · ${statNames[type] || "装备"}判定`,
+      true,
+      result.parity,
     );
   return result;
 }
@@ -440,7 +498,12 @@ function checkStrikes(s) {
   if (a.failed) hit = false;
   if (gearCount(s, b.side, "l03")) hit = true;
   if (b.flip) hit = !hit;
-  if (b.side !== MONSTER && effect(s, "b05.1") && margin % 2 === 0) hit = false;
+  if (
+    b.side !== MONSTER &&
+    effect(s, "b05.1") &&
+    parityOf(margin, a.parity) === "even"
+  )
+    hit = false;
   return { hit, margin, shield };
 }
 
@@ -457,7 +520,11 @@ function resolveStrike(s) {
   const av = status(s, actor),
     dv = status(s, target);
   if (b.shock && !dv.stun) dv.stun = b.fighters[target].turns + 1;
-  if (actor !== MONSTER && effect(s, "b07.2") && Math.abs(a.total % 2) === 1)
+  if (
+    actor !== MONSTER &&
+    effect(s, "b07.2") &&
+    parityOf(a.total, a.parity) === "odd"
+  )
     av.disarm = b.fighters[actor].turns + 1;
   if (target === MONSTER && effect(s, "b03.2")) dv.rage = (dv.rage || 0) + 2;
   if (actor === MONSTER && effect(s, "b03.2")) delete av.rage;
@@ -487,12 +554,13 @@ function resolveStrike(s) {
   if (
     target === MONSTER &&
     effect(s, "e02.1") &&
+    !hit &&
     hp(s, target) > 0 &&
     !d.cannot &&
     !b.shock
   ) {
     changeHP(s, target, 1);
-    log(s, "兽人防御后回复 1 点生命。");
+    log(s, "兽人防御成功，回复 1 点生命。");
   }
   let thornDamage = 0;
   if (gearCount(s, target, "l05") && !d.cannot && !b.shock) {
@@ -557,6 +625,17 @@ function afterStrike(s) {
   }
   if (b.pendingOutcome) {
     setOutcome(s, b.pendingOutcome);
+    return;
+  }
+  if (b.nextSlime) {
+    delete b.nextSlime;
+    b.fighters[MONSTER].status = {};
+    b.fighters[MONSTER].turns = 0;
+    b.fighters[b.first].chalice = 0;
+    b.round = 1;
+    b.side = b.first;
+    b.attackRoll = b.defenseRoll = null;
+    beginTurn(s);
     return;
   }
   if (b.remaining <= 0) endTurn(s);
@@ -657,7 +736,7 @@ function reactionChoices(s, id) {
     gearCount(s, id, "l06") &&
     !b.shock &&
     !status(s, rival(b, id)).stun &&
-    roll.total % 2 === 0
+    parityOf(roll.total, roll.parity) === "even"
   ) {
     choices.push(action("shock", "发动震魂锤", "l06"));
   }
@@ -874,8 +953,20 @@ function useItem(s, id, card, arg, more, rng) {
       break;
     case "i19":
       roll.total += Number(arg);
-      if (!equipment && id === b.side && roll.total % 2) b.shock = false;
-      recordDice(s, roll.dice, roll.total, `${p.name} · 调运砝码`, false);
+      if (
+        !equipment &&
+        id === b.side &&
+        parityOf(roll.total, roll.parity) === "odd"
+      )
+        b.shock = false;
+      recordDice(
+        s,
+        roll.dice,
+        roll.total,
+        `${p.name} · 调运砝码`,
+        false,
+        roll.parity,
+      );
       break;
   }
   if (["i07", "i12", "i13", "i14", "i15", "i16"].includes(card)) {

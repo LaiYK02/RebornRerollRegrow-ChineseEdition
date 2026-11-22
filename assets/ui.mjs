@@ -300,6 +300,8 @@ function hud(p, me, b) {
     (me ? "self " : "") +
     (b?.actors?.includes(p.id) && !b.monster ? "dueling " : "") +
     (!p.online ? "offline" : "") +
+    '" data-player="' +
+    esc(p.id) +
     '" style="--pc:' +
     colorsafe(p.color) +
     '"><div class="gearline">' +
@@ -386,6 +388,7 @@ export function board(g) {
           region[1] +
           " · " +
           kind[0] +
+          (t.banana ? " · 有香蕉皮" : "") +
           (t.boss ? " · " + cards[t.boss].name : "");
         const pic = tilePictures[t.type] || t.biome;
         const style =
@@ -419,6 +422,9 @@ export function board(g) {
           (t.type === "legendaryChest"
             ? '<span class="terrain-dot" aria-hidden="true">✦</span>'
             : "") +
+          (t.banana
+            ? '<img class="banana-marker" src="./assets/cards/i10.jpg" alt="香蕉皮">'
+            : "") +
           pawns(residents) +
           "</button>"
         );
@@ -427,6 +433,12 @@ export function board(g) {
     "</div>"
   );
 }
+export function parityLabel(parity) {
+  if (parity === "even") return "（视为偶数）";
+  if (parity === "odd") return "（视为奇数）";
+  return "";
+}
+
 function rollLine(r, label) {
   return r
     ? "<span><b>" +
@@ -435,7 +447,9 @@ function rollLine(r, label) {
         (r.dice?.length ? r.dice.join(" + ") + " → " : "") +
         "<strong>" +
         esc(r.total) +
-        "</strong></span>"
+        "</strong>" +
+        parityLabel(r.parity) +
+        "</span>"
     : "";
 }
 export function battle(g) {
@@ -443,7 +457,7 @@ export function battle(g) {
     c = cards[b.form || b.monster],
     op = g.players.find((p) => p.id === b.actors?.[1]);
   const title =
-    c?.name ||
+    (b.slimes ? "分裂史莱姆" : c?.name) ||
     b.actors.map((id) => g.players.find((p) => p.id === id)?.name).join(" ⚔ ");
   const effects = (b.effects || [])
     .map(
@@ -478,8 +492,33 @@ export function battle(g) {
     " 防御 " +
     esc(b.def ?? op?.def ?? "—") +
     "</b></div>" +
-    hearts(b.hp ?? op?.hp ?? 10, b.maxHp || 10) +
-    art(c?.id || "knight", "battle-art") +
+    (b.slimes
+      ? '<div class="slime-pair">' +
+        ["左侧", "右侧"]
+          .map((label, index) => {
+            const target = index === 2 - b.slimes;
+            const defeated = index === 0 && b.slimes === 1;
+            const hp = defeated ? 0 : target ? b.hp : b.maxHp;
+            return (
+              '<div class="split-slime ' +
+              (target ? "target" : defeated ? "defeated" : "") +
+              '">' +
+              art("n01", "battle-art") +
+              hearts(hp, b.maxHp) +
+              "<b>" +
+              label +
+              (target
+                ? " · 当前目标"
+                : defeated
+                  ? " · 已击败"
+                  : " · 等待出战") +
+              "</b></div>"
+            );
+          })
+          .join("") +
+        "</div>"
+      : hearts(b.hp ?? op?.hp ?? 10, b.maxHp || 10) +
+        art(c?.id || "knight", "battle-art")) +
     '<div class="battle-rolls">' +
     rollLine(b.attackRoll, "攻击判定") +
     rollLine(b.defenseRoll, "防御判定") +
@@ -565,6 +604,7 @@ export function game(r, solo) {
         g.dice.values.join(" + ") +
         " → " +
         esc(g.dice.total) +
+        parityLabel(g.dice.parity) +
         "</small>"
       : "") +
     '</div></div><aside class="inventory"><h3>' +

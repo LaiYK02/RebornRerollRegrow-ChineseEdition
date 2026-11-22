@@ -40,15 +40,29 @@ function play(s, id, rng = ones) {
 }
 const choices = (s) => battleActions(s, s.battle.actorId).map((a) => a.id);
 
+test("精英数值随地形增长，普通怪全属性提高 1", () => {
+  for (const [biome, bonus] of [
+    ["plain", 0],
+    ["desert", 0],
+    ["rainforest", 1],
+    ["volcano", 2],
+  ]) {
+    const b = encounter("e02", {}, { biome }).battle;
+    assert.deepEqual([b.atk, b.def, b.hp], [4 + bonus, 3 + bonus, 3 + bonus]);
+  }
+  const b = encounter("n01").battle;
+  assert.deepEqual([b.atk, b.def, b.hp], [3, 2, 2]);
+});
+
 test("怪物直接使用攻防值，玩家每次掷骰后都可确认", () => {
   const s = encounter("n02");
-  choose(s, "attack", die(3));
+  choose(s, "attack", die(4));
   assert.deepEqual(s.battle.defenseRoll.dice, []);
-  assert.equal(s.battle.defenseRoll.total, 2);
-  assert.equal(s.battle.hp, 1);
+  assert.equal(s.battle.defenseRoll.total, 3);
+  assert.equal(s.battle.hp, 2);
   assert.deepEqual(choices(s), ["confirm"]);
   play(s, "confirm");
-  assert.equal(s.battle.outcome.type, "monsterWin");
+  assert.equal(s.battle.hp, 1);
 
   const t = encounter("e01");
   choose(t, "attack", die(5));
@@ -106,8 +120,8 @@ test("平手无伤，未经授权的行动不改变对局", () => {
   const s = encounter("n01");
   assert.deepEqual(battleActions(s, "旁观者"), []);
   assert.throws(() => actBattle(s, "旁观者", "attack"));
-  assert.equal(s.battle.hp, 1);
-  play(s, "attack");
+  assert.equal(s.battle.hp, 2);
+  play(s, "attack", die(2));
   assert.equal(s.battle.phase, "defend");
   assert.equal(s.battle.last.hit, false);
   play(s, "defend");
@@ -124,20 +138,28 @@ test("精英史莱姆须打倒两个分裂体，逃走后能原样恢复", () =>
   assert.equal(play(s, "attack"), null);
   assert.equal(s.battle.form, "n01");
   assert.equal(s.battle.slimes, 2);
+  assert.equal(s.battle.remaining, 5);
+  play(s, "attack");
   play(s, "attack");
   assert.equal(s.battle.slimes, 1);
+  assert.equal(s.battle.remaining, 5);
+  assert.equal(s.battle.hp, 2);
   const escaped = play(s, "use:i04");
   const next = encounter(
     "e03",
     { atk: 2 },
     { monsterState: escaped.monsterState },
   );
-  assert.equal(play(next, "attack").monsterId, "e03");
+  play(next, "attack", die(3));
+  play(next, "defend");
+  assert.equal(play(next, "attack", die(3)).monsterId, "e03");
 });
 
-test("兽人防御后回血，吸血鬼命中回血，狼人初始获五点生命攻击", () => {
-  const orc = encounter("e02", { atk: 4 });
-  play(orc, "attack");
+test("兽人只在防御成功后回血，吸血鬼命中回血，狼人初始获五点生命攻击", () => {
+  const orc = encounter("e02", { act: 2 });
+  play(orc, "attack", die(4));
+  assert.equal(orc.battle.hp, 2);
+  play(orc, "attack", die(3));
   assert.equal(orc.battle.hp, 3);
   const vampire = encounter("e04", {}, { monsterHp: 1 });
   play(vampire, "attack");
@@ -356,13 +378,17 @@ test("骑士精神、锁具咒与破咒钉在决斗中可指定目标，百宝�
 });
 
 test("致命一击后可发动圣杯，装备判定也支持选择骰点、借骰、重掷和反转", () => {
-  const s = encounter("n01", {
-    atk: 2,
-    hp: 8,
-    gear: ["l12"],
-    items: ["i09", "i18", "i08", "i01"],
-  });
-  play(s, "attack");
+  const s = encounter(
+    "n01",
+    {
+      atk: 2,
+      hp: 8,
+      gear: ["l12"],
+      items: ["i09", "i18", "i08", "i01"],
+    },
+    { monsterHp: 1 },
+  );
+  play(s, "attack", die(2));
   play(s, "confirm");
   assert.equal(s.battle.phase, "optional");
   assert.equal(s.battle.outcome, null);
@@ -389,7 +415,8 @@ test("放弃圣杯仍可在同轮随后一次造成伤害后发动", () => {
 test("先声双刃的额外攻击可放弃，断命斧斩杀、奇偶符和属性装备参与实际判定", () => {
   const s = encounter("e03", { gear: ["c09", "c07", "c01"] });
   play(s, "attack");
-  assert.equal(s.battle.last.attack, 4);
+  assert.equal(s.battle.last.attack, 3);
+  assert.equal(s.battle.attackRoll.parity, "even");
   assert.ok(choices(s).includes("passOpening"));
   play(s, "passOpening");
   assert.equal(s.battle.phase, "defend");
@@ -399,7 +426,7 @@ test("先声双刃的额外攻击可放弃，断命斧斩杀、奇偶符和属�
     { monsterHp: 2 },
   );
   assert.equal(play(axe, "attack").type, "monsterWin");
-  assert.equal(axe.battle.last.attack, 7);
+  assert.equal(axe.battle.last.attack, 6);
   const sigil = encounter("b01", { gear: ["l14", "l07"], atk: 9, act: 3 });
   play(sigil, "attack");
   assert.equal(sigil.battle.last.attack, 4);

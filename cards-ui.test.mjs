@@ -4,7 +4,7 @@ import { readFile, access } from "node:fs/promises";
 import { cards } from "./cards.mjs";
 import { newGame, view } from "./game.mjs";
 import { startBattle } from "./battle.mjs";
-import { art, board, game as renderGame } from "./assets/ui.mjs";
+import { art, battle, board, game as renderGame } from "./assets/ui.mjs";
 
 test("决斗中的两张角色卡高亮，损失与回复的生命反映在红灰心数量", () => {
   const state = newGame(roster);
@@ -34,6 +34,23 @@ const roster = ["黎明", "正午", "黄昏", "夜游"].map((name, index) => ({
   color: "#348f98",
   online: true,
 }));
+
+test("棋盘显示香蕉皮，两只分裂史莱姆同时显示并标出当前目标", () => {
+  const state = newGame(roster);
+  state.board[5].banana = true;
+  assert.match(
+    board(view(state, "0")),
+    /class="banana-marker"[^>]*alt="香蕉皮"/,
+  );
+  startBattle(state, {
+    attackerId: "0",
+    monsterId: "e03",
+    monsterState: { form: "n01", slimes: 2 },
+  });
+  assert.match(battle(view(state, "0")), /左侧 · 当前目标.*右侧 · 等待出战/);
+  state.battle.slimes = 1;
+  assert.match(battle(view(state, "0")), /左侧 · 已击败.*右侧 · 当前目标/);
+});
 
 test("全部卡图可读取，十九句彩蛋与中文版道具列表逐字相同", async () => {
   const text = await readFile(
