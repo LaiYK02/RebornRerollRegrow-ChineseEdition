@@ -255,14 +255,16 @@ function syncBadge(p) {
     p[p.badgeStat]--;
     p.alloc[p.badgeStat]--;
     p.badgeStat = null;
-  } else p.sp = Math.max(0, p.sp - 1);
+  } else if (!p.badgeSpentByTrap) p.sp = Math.max(0, p.sp - 1);
+  delete p.badgeSpentByTrap;
   p.badgeActive = active;
 }
 
 function upgrade(p, stat, spend) {
   if (spend) {
     p.sp--;
-    if (p.badgeActive && !p.badgeStat) p.badgeStat = stat;
+    if (p.badgeActive && !p.badgeStat && !p.badgeSpentByTrap)
+      p.badgeStat = stat;
   }
   p.alloc[stat]++;
   p[stat]++;
@@ -495,6 +497,8 @@ function resolveSpace(game, p, rng) {
       return;
     case "trap":
       if (p.sp > 0) {
+        if (p.sp === 1 && p.badgeActive && !p.badgeStat)
+          p.badgeSpentByTrap = true;
         p.sp--;
         log(game, p.name + " 触发陷阱，失去 1 点未分配技能点。");
       } else log(game, p.name + " 触发陷阱，但没有未分配的技能点。");

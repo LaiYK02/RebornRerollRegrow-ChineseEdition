@@ -568,6 +568,24 @@ test("悟技徽章进入传说宝箱，归途传承印存活返乡时也弃置",
   assert.deepEqual(p.gear, ["c13"]);
 });
 
+test("陷阱扣掉徽章赠送的点数后，弃置徽章不会再扣后来获得的点数", () => {
+  const g = solo(),
+    [p] = g.players;
+  p.pos = 81;
+  choose(g, "roll", die(1));
+  step(g, "check:accept");
+  step(g, "take:c13");
+  assert.equal(p.sp, 1);
+  p.pos = 20;
+  step(g, "end");
+  step(g, "roll", die(1));
+  assert.equal(p.sp, 0);
+  p.sp++;
+  g.phase = "deathDiscard";
+  step(g, "discard:c13");
+  assert.equal(p.sp, 1);
+});
+
 test("a disconnected player can resume a private choice or a wounded monster", () => {
   const g = pair(),
     [a, b] = g.players;
