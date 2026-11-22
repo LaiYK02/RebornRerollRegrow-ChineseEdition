@@ -35,6 +35,15 @@ const roster = ["黎明", "正午", "黄昏", "夜游"].map((name, index) => ({
   online: true,
 }));
 
+test("贪婪护盾耐久与暴怒基础攻击和蓄力在战斗界面独立显示", () => {
+  const state = newGame(roster);
+  startBattle(state, { attackerId: "0", monsterId: "b05" });
+  assert.match(battle(view(state, "0")), /额外护盾.*20 \/ 20/);
+  startBattle(state, { attackerId: "0", monsterId: "b03" });
+  state.battle.rageBonus = 4;
+  assert.match(battle(view(state, "0")), /基础 8 · 蓄力 \+4/);
+});
+
 test("棋盘显示香蕉皮，两只分裂史莱姆同时显示并标出当前目标", () => {
   const state = newGame(roster);
   state.board[5].banana = true;

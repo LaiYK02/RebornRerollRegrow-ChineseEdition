@@ -153,10 +153,20 @@ test("宝箱独立分级，确认掷骰后才移动或抽装备", () => {
     step(g, "check:accept", die(6));
     assert.equal(g.board[p.pos - 1].type, type);
     assert.equal(g.phase, "offer");
-    assert.equal(view(g, "a").actions.length, 3);
+    const options = view(g, "a").actions;
+    assert.equal(options.length, 4);
+    assert.ok(options.some(({ id }) => id === "passOffer"));
     assert.ok(
-      view(g, "a").actions.every(({ card }) => card.startsWith(prefix)),
+      options
+        .filter(({ card }) => card)
+        .every(
+          ({ card }) =>
+            cards[card].kind === (prefix === "c" ? "普通装备" : "传说装备"),
+        ),
     );
+    step(g, "passOffer");
+    assert.equal(g.phase, "end");
+    assert.deepEqual(p.gear, []);
     assert.ok(
       g.board
         .filter((t) => t.type === "legendaryChest")
@@ -178,7 +188,11 @@ test("旧单人存档保留进度，并升级火山宝箱和宝箱待选装备",
   assert.equal(g.players[0].hp, 7);
   assert.equal(g.board[81].type, "legendaryChest");
   assert.equal(g.board[81].terrain, "volcano");
-  assert.ok(view(g, "a").actions.every(({ card }) => card.startsWith("l")));
+  assert.ok(
+    view(g, "a")
+      .actions.filter(({ card }) => card)
+      .every(({ card }) => cards[card].kind === "传说装备"),
+  );
 });
 
 test("确认移动后记录沙漠的逐格前进与后退，火山传送到达也计伤害", () => {
@@ -214,8 +228,11 @@ test("draws and unplayed items stay private and snapshots do not mutate authorit
   step(g, "roll", die(2));
   const a = view(g, "a"),
     b = view(g, "b");
-  assert.equal(a.actions.length, 3);
-  assert.equal(new Set(a.actions.map((a) => a.card)).size, 3);
+  assert.equal(a.actions.length, 4);
+  assert.equal(
+    new Set(a.actions.filter((a) => a.card).map((a) => a.card)).size,
+    3,
+  );
   assert.deepEqual(b.actions, []);
   assert.equal(a.players[1].items, undefined);
   assert.equal(a.players[1].itemCount, 1);
@@ -494,7 +511,7 @@ test("offline seats retain progress, skip turns and can act after reconnecting",
   step(g, "end");
   assert.equal(g.turn, "b");
   setOnline(g, "a", true);
-  step(g, "roll", die(1));
+  step(g, "roll", die(5));
   step(g, "end");
   assert.equal(g.turn, "a");
   setOnline(g, "b", false);
@@ -507,6 +524,48 @@ test("offline seats retain progress, skip turns and can act after reconnecting",
   assert.equal(g.turn, "b");
   assert.equal(q.online, true);
   assert.equal(p.online, false);
+});
+
+test("陷阱扣除未分配技能点，最终头目逃跑立即按败北弃置传说装备", () => {
+  const g = solo(),
+    [p] = g.players;
+  p.pos = 20;
+  p.sp = 2;
+  step(g, "roll", die(1));
+  assert.equal(g.board[20].type, "trap");
+  assert.equal(p.sp, 1);
+  assert.equal(g.phase, "end");
+
+  p.pos = 100;
+  p.gear = ["c13", "l02"];
+  p.items = ["i04"];
+  g.phase = "finish";
+  step(g, "challenge");
+  step(g, "use:i04");
+  assert.equal(p.pos, 1);
+  assert.equal(g.phase, "deathDiscard");
+  assert.ok(ids(g).includes("discard:c13"));
+  step(g, "discard:c13");
+  assert.deepEqual(p.gear, ["l02"]);
+  assert.equal(g.phase, "end");
+});
+
+test("悟技徽章进入传说宝箱，归途传承印存活返乡时也弃置", () => {
+  const g = solo(),
+    [p] = g.players;
+  p.pos = 81;
+  choose(g, "roll", die(1));
+  step(g, "check:accept");
+  assert.ok(ids(g).includes("take:c13"));
+  step(g, "take:c13");
+  assert.equal(p.sp, 1);
+  p.pos = 100;
+  p.gear.push("l13");
+  g.phase = "finish";
+  step(g, "return");
+  assert.equal(p.pos, 1);
+  assert.deepEqual([p.atk, p.def, p.act], [2, 2, 2]);
+  assert.deepEqual(p.gear, ["c13"]);
 });
 
 test("a disconnected player can resume a private choice or a wounded monster", () => {
@@ -555,6 +614,9 @@ function chooseAdventureAction(g, snapshot) {
     l03: 90,
     c10: 80,
     l02: 70,
+    c13: 65,
+    c17: 28,
+    c05: -8,
     l15: 58,
     l06: 52,
     l07: 44,
@@ -581,7 +643,13 @@ function chooseAdventureAction(g, snapshot) {
   if (g.phase === "offer" || g.phase === "loot")
     return [...options].sort((a, b) => score(b) - score(a))[0];
   const improve =
-    p.def < Math.min(4, p.atk) ? "def" : p.act >= p.atk + 1 ? "atk" : "act";
+    p.atk < 3
+      ? "atk"
+      : p.def < Math.min(4, p.atk)
+        ? "def"
+        : p.act >= p.atk + 1
+          ? "atk"
+          : "act";
   const priority = [
     "challenge",
     ...(p.hp < 9 ? ["heal", "use:i02"] : []),

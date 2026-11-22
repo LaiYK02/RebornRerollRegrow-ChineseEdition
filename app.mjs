@@ -574,7 +574,7 @@ function scheduleTurnReminder(next) {
     );
     if (card) card.classList.add("turn-reminder");
   };
-  reminderTimer = setTimeout(remind, 3000);
+  reminderTimer = setTimeout(remind, 5000);
 }
 
 function animateDice(dice) {
@@ -586,7 +586,12 @@ function animateDice(dice) {
   panel.innerHTML = '<div class="rolling-faces"></div><b></b>';
   const heading = panel.querySelector("b");
   const faces = panel.querySelector(".rolling-faces");
-  const visible = dice.values.slice(0, 8);
+  const visible = dice.values;
+  const columns = Math.max(8, Math.ceil(Math.sqrt(visible.length * 2)));
+  faces.style.setProperty(
+    "--die-size",
+    "clamp(12px, " + 72 / columns + "vw, 56px)",
+  );
   const glyphs = "⚀⚁⚂⚃⚄⚅";
   const diceElements = visible.map(() => document.createElement("span"));
   faces.append(...diceElements);

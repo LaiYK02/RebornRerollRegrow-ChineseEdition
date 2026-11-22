@@ -94,6 +94,7 @@ export const tiles = {
   portal: ["传送门", "portal", "#7259a8"],
   rest: ["休息", "rest", "#ac7837"],
   duel: ["决斗", "duel", "#a54755"],
+  trap: ["陷阱 · 技能点 −1", "skull", "#9b381e"],
   plain: ["路途", "step", "#78866a"],
 };
 export const hearts = (hp, max = 10) =>
@@ -405,6 +406,7 @@ export function board(g) {
           (residents.length ? "occupied " : "") +
           (t.type === "plain" ? "road" : "site") +
           (t.type === "legendaryChest" ? " legendary-chest" : "") +
+          (t.type === "trap" ? " trap-space" : "") +
           '" data-tile="' +
           (i + 1) +
           '" style="' +
@@ -421,6 +423,9 @@ export function board(g) {
           (t.type !== "plain" ? '<i class="type-dot"></i>' : "") +
           (t.type === "legendaryChest"
             ? '<span class="terrain-dot" aria-hidden="true">✦</span>'
+            : "") +
+          (t.type === "trap"
+            ? '<span class="trap-marker">' + icon("skull") + " −1</span>"
             : "") +
           (t.banana
             ? '<img class="banana-marker" src="./assets/cards/i10.jpg" alt="香蕉皮">'
@@ -485,6 +490,12 @@ export function battle(g) {
     icon("sword") +
     " 攻击 " +
     esc(b.atk ?? op?.atk ?? "—") +
+    (b.rageBonus !== undefined && (b.rageBonus || b.atk !== b.baseAtk)
+      ? '<small class="attack-breakdown">基础 ' +
+        esc(b.baseAtk) +
+        (b.rageBonus ? " · 蓄力 +" + esc(b.rageBonus) : "") +
+        "</small>"
+      : "") +
     "</b><h2>" +
     esc(title) +
     "</h2><b>" +
@@ -492,6 +503,19 @@ export function battle(g) {
     " 防御 " +
     esc(b.def ?? op?.def ?? "—") +
     "</b></div>" +
+    (b.shieldMax
+      ? '<div class="boss-shield">' +
+        icon("shield") +
+        ' 额外护盾 <meter min="0" max="' +
+        b.shieldMax +
+        '" value="' +
+        b.shield +
+        '" aria-label="剩余护盾"></meter><b>' +
+        b.shield +
+        " / " +
+        b.shieldMax +
+        "</b></div>"
+      : "") +
     (b.slimes
       ? '<div class="slime-pair">' +
         ["左侧", "右侧"]

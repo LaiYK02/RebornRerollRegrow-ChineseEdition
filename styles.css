@@ -1620,9 +1620,43 @@ body {
   justify-content: center;
   flex-wrap: wrap;
   gap: 7px;
-  font-size: clamp(26px, 6vw, 56px);
+  font-size: var(--die-size, clamp(26px, 6vw, 56px));
   line-height: 1;
   padding-bottom: 5px;
+  max-height: 50vh;
+  overflow: auto;
+}
+.dice-animation.revealed {
+  pointer-events: auto;
+}
+.trap-space .terrain-art {
+  opacity: 0.35;
+}
+.trap-marker {
+  z-index: 2;
+  color: #952d1f;
+  font-size: clamp(8px, 1.4vw, 13px);
+  font-weight: 900;
+}
+.trap-marker .icon {
+  width: 1em;
+  height: 1em;
+}
+.attack-breakdown {
+  color: #65542c;
+}
+.boss-shield {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #285b78;
+  font-size: 12px;
+}
+.boss-shield .icon {
+  width: 15px;
+}
+.boss-shield meter {
+  width: clamp(45px, 12vw, 120px);
 }
 .dice-animation:not(.revealed) .rolling-faces span {
   animation: tumble-die 0.36s ease-in-out alternate infinite;

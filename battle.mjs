@@ -4,6 +4,7 @@ const MONSTER = "$monster";
 const statNames = { atk: "攻击", def: "防御", act: "行动" };
 const statusNames = {
   envy: "嫉妒诅咒",
+  gearSeal: "装备失效诅咒",
   sloth: "怠惰削弱",
   disarm: "缴械",
   stun: "晕眩",
@@ -34,7 +35,7 @@ const status = (s, id) => s.battle.fighters[id].status;
 const cardName = (id) => cards[id]?.name || id;
 
 function gearCount(s, id, card) {
-  if (id === MONSTER || effect(s, "b02.3")) return 0;
+  if (id === MONSTER || status(s, id).gearSeal) return 0;
   const p = player(s, id);
   if (
     (p.locked || []).includes(card) ||
@@ -95,6 +96,7 @@ function removeEffect(s, key) {
     b.hp = Math.min(b.hp, b.maxHp);
   }
   if (key === "b02.1") delete status(s, b.first).envy;
+  if (key === "b02.3") delete status(s, b.first).gearSeal;
   if (key === "b04.2") delete status(s, b.first).sloth;
   if (key === "b03.1") delete status(s, MONSTER).growth;
   if (key === "b03.2") delete status(s, MONSTER).rage;
@@ -123,6 +125,7 @@ function debuffed(s, id) {
     v.disarm ||
     v.stun ||
     v.envy ||
+    v.gearSeal ||
     v.sloth ||
     v.knight ||
     p?.movePenalty ||
@@ -154,8 +157,16 @@ function stats(s, id) {
 
 function sync(s) {
   const b = s.battle;
-  if (b.monster)
-    Object.assign(b, { atk: monsterStats(s).atk, def: monsterStats(s).def });
+  if (b.monster) {
+    const { atk, def } = monsterStats(s);
+    Object.assign(b, {
+      atk,
+      def,
+      baseAtk: b.base.atk,
+      rageBonus: status(s, MONSTER).rage || 0,
+      shieldMax: effect(s, "b05.3") ? 20 : 0,
+    });
+  }
   b.effects = b.active.map(effectText);
   b.detail =
     b.phase === "done"
@@ -224,6 +235,7 @@ export function startBattle(
     b.maxHp = form === "final" ? 15 : card.hp + (effect(s, "e05.1") ? 5 : 0);
     b.hp = Math.min(b.maxHp, monsterState?.hp ?? monsterHp ?? b.maxHp);
     if (effect(s, "b02.1")) status(s, b.first).envy = 2;
+    if (effect(s, "b02.3")) status(s, b.first).gearSeal = true;
     if (
       b.active.length &&
       player(s, attackerId).gear.includes("l01") &&
@@ -242,6 +254,7 @@ export function startBattle(
 
 export function restoreBattleRules(s, biome) {
   const b = s.battle;
+  if (effect(s, "b02.3")) status(s, b.first).gearSeal = true;
   if (b.monster && b.form !== "final") {
     const profile = monsterProfile(b.form, biome);
     b.biome = biome;
@@ -255,6 +268,14 @@ export function restoreBattleRules(s, biome) {
     if (!roll || roll.cannot) continue;
     if (roll.id === MONSTER) {
       roll.total = b[roll.type];
+      continue;
+    }
+    if (effect(s, "b07.1") && roll.dice.length) {
+      roll.dice = roll.dice.slice(0, 1);
+      roll.count = 1;
+      roll.total = roll.dice[0];
+      roll.parity = undefined;
+      roll.failed = false;
       continue;
     }
     const parity = rollParity(s, roll.id);
@@ -358,12 +379,14 @@ function checkEnd(s) {
 function endTurn(s) {
   const b = s.battle,
     f = b.fighters[b.side];
-  for (const k of ["stun", "disarm"])
-    if (f.status[k] <= f.turns) delete f.status[k];
+  if (f.status.stun <= f.turns) delete f.status.stun;
   b.side = rival(b, b.side);
+  // The player remains disarmed during the opponent's response to the skipped turn.
+  const next = b.fighters[b.side];
+  if (next.status.disarm <= next.turns) delete next.status.disarm;
   if (b.side === b.first) {
-    if (effect(s, "b06.2") && b.round === 10) {
-      log(s, `${name(s, MONSTER)}在第 10 轮结束时自爆！`);
+    if (effect(s, "b06.2") && b.round >= 5) {
+      log(s, `${name(s, MONSTER)}在第 5 轮结束时自爆！`);
       b.hp = 0;
       applyDamage(s, b.first, 8 + gearCount(s, b.first, "c17"));
       if (checkEnd(s)) return;
@@ -410,10 +433,12 @@ export function recordDice(s, values, total, label, rolled = true, parity) {
 function makeRoll(s, id, type, count, rng, cannot = false) {
   const f = s.battle.fighters[id],
     v = f.status;
+  const singleDie = effect(s, "b07.1");
+  if (singleDie) count = 1;
   const dice = [];
   if (!cannot) {
     for (let j = 0; j < count; j++) {
-      dice.push(f.golden || 1 + pick(rng, 6));
+      dice.push((singleDie ? 0 : f.golden) || 1 + pick(rng, 6));
       f.golden = 0;
     }
   }
@@ -421,10 +446,10 @@ function makeRoll(s, id, type, count, rng, cannot = false) {
     id,
     type,
     dice,
-    total: cannot ? 0 : adjusted(s, id, dice, type),
+    total: cannot ? 0 : singleDie ? dice[0] : adjusted(s, id, dice, type),
     count,
     cannot,
-    parity: rollParity(s, id),
+    parity: singleDie ? undefined : rollParity(s, id),
   };
   result.failed =
     cannot ||
@@ -455,9 +480,7 @@ function rollFor(s, id, type, rng) {
       failed: cannot,
     };
   }
-  const count =
-    (effect(s, "b07.1") ? 1 : playerStats(s, id)[type]) +
-    (status(s, id).extra || 0);
+  const count = playerStats(s, id)[type] + (status(s, id).extra || 0);
   return makeRoll(s, id, type, count, rng, cannot);
 }
 
@@ -492,9 +515,14 @@ function checkStrikes(s) {
   if (b.side === MONSTER && effect(s, "b05.2"))
     defense -= Math.floor(defense / 2);
   const margin = a.total - shield - defense;
+  if (effect(s, "b07.1")) {
+    const hit =
+      b.side === MONSTER
+        ? d.cannot || d.dice[0] < 4
+        : !!gearCount(s, b.side, "l03") || a.dice[0] >= 4;
+    return { hit, margin, shield };
+  }
   let hit = margin > 0;
-  if (effect(s, "b07.1"))
-    hit = b.side === MONSTER ? d.failed || d.total < 4 : a.total >= 4;
   if (a.failed) hit = false;
   if (gearCount(s, b.side, "l03")) hit = true;
   if (b.flip) hit = !hit;
@@ -539,6 +567,7 @@ function resolveStrike(s) {
     if (!b.monster) amount += gearCount(s, actor, "l09");
     if (actor === MONSTER && effect(s, "b01.1")) amount++;
     if (actor === MONSTER && effect(s, "b07.3") && dv.disarm) amount++;
+    if (actor === MONSTER && effect(s, "e01.1") && b.hp === 1) amount *= 2;
     if (hp(s, target) <= 2 && gearCount(s, actor, "c10"))
       amount = Math.max(amount, hp(s, target));
     damage = applyDamage(s, target, amount);
@@ -563,10 +592,10 @@ function resolveStrike(s) {
     log(s, "兽人防御成功，回复 1 点生命。");
   }
   let thornDamage = 0;
-  if (gearCount(s, target, "l05") && !d.cannot && !b.shock) {
+  if (gearCount(s, target, "l05") && !hit && !d.failed && !b.shock) {
     const thorn =
       1 +
-      Math.floor(Math.max(0, d.total) / 5) +
+      Math.floor(Math.max(0, -margin) / 5) +
       gearCount(s, target, "l02") +
       gearCount(s, target, "c17") +
       gearCount(s, actor, "c17");
@@ -631,12 +660,7 @@ function afterStrike(s) {
     delete b.nextSlime;
     b.fighters[MONSTER].status = {};
     b.fighters[MONSTER].turns = 0;
-    b.fighters[b.first].chalice = 0;
-    b.round = 1;
-    b.side = b.first;
     b.attackRoll = b.defenseRoll = null;
-    beginTurn(s);
-    return;
   }
   if (b.remaining <= 0) endTurn(s);
   else {
@@ -689,12 +713,22 @@ function statusName(key) {
 
 function cleanse(s, id, key) {
   const p = player(s, id);
-  if (key === "snare") p.movePenalty = 0;
+  if (key === "gearSeal") removeEffect(s, "b02.3");
+  else if (key === "snare") p.movePenalty = 0;
   else if (key === "slipped")
     p.statuses = p.statuses.filter((entry) => entry.type !== "slipped");
   else if (key.startsWith("lock-"))
     p.locked = p.locked.filter((card) => card !== key.slice(5));
   else delete status(s, id)[key];
+}
+
+function cleanseOptions(s, id, target, strong) {
+  const keys = statusKeys(s, target, strong);
+  return target === id
+    ? keys
+    : keys.filter((key) =>
+        ["growth", "rage", "oil", "extra", "atk", "def", "act"].includes(key),
+      );
 }
 
 function updateRemaining(s) {
@@ -720,12 +754,16 @@ function reactionChoices(s, id) {
   const pvpAttack = !b.monster && b.side === id;
   if (pvpAttack && b.phase === "reaction")
     return items.includes("i01") ? [itemChoice("i01", "反转命中结果")] : [];
-  if (items.includes("i01") && b.phase !== "attackReview")
+  if (
+    !effect(s, "b07.1") &&
+    items.includes("i01") &&
+    b.phase !== "attackReview"
+  )
     choices.push(
       itemChoice("i01", equipment ? "反转装备判定" : "反转命中结果"),
     );
   if (items.includes("i08")) choices.push(itemChoice("i08", "重掷我的判定"));
-  if (items.includes("i19"))
+  if (!effect(s, "b07.1") && items.includes("i19"))
     choices.push(
       itemChoice("i19", "判定 +2", "2"),
       itemChoice("i19", "判定 −2", "-2"),
@@ -766,7 +804,8 @@ function itemChoices(s, id) {
           choices.push(itemChoice(card, `本场${label} +1`, key));
         break;
       case "i09":
-        choices.push(itemChoice(card, "本次多掷一枚骰子"));
+        if (!effect(s, "b07.1"))
+          choices.push(itemChoice(card, "本次多掷一枚骰子"));
         break;
       case "i12":
         if (other === MONSTER)
@@ -796,7 +835,7 @@ function itemChoices(s, id) {
         for (const target of [id, other]) {
           const who = target === id ? "自己" : name(s, target);
           const side = target === id ? "self" : "other";
-          const keys = statusKeys(s, target, card === "i15");
+          const keys = cleanseOptions(s, id, target, card === "i15");
           if (card === "i15" && keys.length)
             choices.push(itemChoice(card, `净化${who}的全部状态`, side));
           if (card === "i14")
@@ -814,7 +853,7 @@ function itemChoices(s, id) {
         if (!b.monster) choices.push(itemChoice(card, "双方展开骑士对决"));
         break;
       case "i18":
-        if (!b.fighters[id].golden)
+        if (!effect(s, "b07.1") && !b.fighters[id].golden)
           for (let n = 1; n <= 6; n++)
             choices.push(itemChoice(card, `下枚骰子为 ${n}`, String(n)));
         break;
@@ -942,7 +981,8 @@ function useItem(s, id, card, arg, more, rng) {
       break;
     case "i15": {
       const target = arg === "self" ? id : other;
-      for (const k of statusKeys(s, target, true)) cleanse(s, target, k);
+      for (const k of cleanseOptions(s, id, target, true))
+        cleanse(s, target, k);
       break;
     }
     case "i16":

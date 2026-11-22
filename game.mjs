@@ -10,8 +10,14 @@ import {
 
 const stats = { atk: "攻击", def: "防御", act: "行动" };
 const palette = ["#e76a51", "#35a89a", "#b18aef", "#e2af40"];
-const pool = (prefix) =>
-  Object.keys(cards).filter((id) => id.startsWith(prefix));
+const legendary = (id) => cards[id]?.kind === "传说装备";
+const inPool = (id, prefix) =>
+  prefix === "l"
+    ? legendary(id)
+    : prefix === "c"
+      ? cards[id]?.kind === "普通装备"
+      : id.startsWith(prefix);
+const pool = (prefix) => Object.keys(cards).filter((id) => inPool(id, prefix));
 const nameOf = (id) => cards[id]?.name ?? id;
 const player = (game, id = game.turn) => game.players.find((p) => p.id === id);
 const equipped = (p, id) => p.gear.includes(id) && !p.locked.includes(id);
@@ -24,7 +30,7 @@ const capHP = (p, amount) => {
 const itemLimit = (p) => (equipped(p, "l16") ? Infinity : 5);
 const action = (id, label, card) =>
   card ? { id, label, card } : { id, label };
-const rulesVersion = 2;
+const rulesVersion = 3;
 
 function log(game, message) {
   game.log.push(message);
@@ -41,14 +47,17 @@ function board() {
   const spaces = {
     start: [1],
     finish: [100],
-    normal: [4, 9, 14, 22, 25, 27, 34, 41, 46, 53, 61, 71],
-    elite: [19, 38, 49, 64, 72, 81, 84, 91, 94],
+    normal: [
+      4, 7, 9, 13, 14, 16, 22, 25, 27, 28, 34, 36, 40, 41, 44, 46, 53, 61, 71,
+    ],
+    elite: [19, 38, 49, 50, 59, 64, 66, 72, 74, 81, 84, 86, 91, 94, 96],
     boss: [32, 43, 54, 69, 78, 87, 98],
     chest: [6, 17, 29, 39, 51, 62, 73],
     legendaryChest: [82, 92],
     item: [3, 12, 23, 31, 42, 52, 65, 75, 83, 93],
     rest: [8, 18, 26, 37, 48, 58, 68, 77, 88, 97],
-    duel: [11, 24, 35, 47, 57, 67, 79, 89],
+    duel: [11, 20, 24, 35, 47, 55, 57, 67, 70, 79, 89, 95],
+    trap: [21, 30, 56, 85, 99],
     portal: [15, 33, 45, 60, 76, 90],
   };
   for (const [type, positions] of Object.entries(spaces)) {
@@ -71,10 +80,12 @@ function board() {
 
 export function restoreGame(game, rng = Math.random) {
   const oldRules = game.rulesVersion !== rulesVersion;
+  const layout = oldRules ? board() : null;
   let wasLegacyBoard = false;
   for (const tile of game.board) {
     wasLegacyBoard ||= tile.terrain !== tile.biome;
     tile.terrain = tile.biome;
+    if (layout && tile.type === "plain") tile.type = layout[tile.pos - 1].type;
     if (tile.type === "chest" && tile.biome === "volcano")
       tile.type = "legendaryChest";
     if (tile.type === "normal" && tile.biome === "volcano") {
@@ -94,14 +105,21 @@ export function restoreGame(game, rng = Math.random) {
     }
     if (game.check) showRoll(game, player(game, game.actor));
   }
-  if (wasLegacyBoard && game.phase === "offer") {
+  if ((wasLegacyBoard || oldRules) && game.phase === "offer") {
     const p = player(game);
     const tile = tileAt(game, p);
     if (tile.type === "chest" || tile.type === "legendaryChest") {
       const tier = tile.type === "chest" ? "c" : "l";
-      if (game.pending.ids.some((id) => !id.startsWith(tier)))
-        offer(game, p, draw(game, tier, 3 + Number(equipped(p, "c14")), rng));
+      if (game.pending.ids.some((id) => !inPool(id, tier)))
+        offer(
+          game,
+          p,
+          draw(game, tier, 3 + Number(equipped(p, "c14")), rng),
+          true,
+        );
+      else game.pending.canPass = true;
     }
+    if (tile.type === "item") game.pending.canPass = true;
   }
   const b = game.battle;
   if (b?.monster) {
@@ -272,8 +290,8 @@ function relocate(game, p, position, death = false, stepwise = false) {
   if (moved && equipped(p, "l11")) capHP(p, 1);
   if (dest === 1 && (moved || death) && equipped(p, "l13")) {
     for (const stat of Object.keys(stats)) upgrade(p, stat, false);
-    log(game, p.name + " 触发归途传承印，三项属性各 +1。");
-    if (death) removeGear(p, "l13");
+    log(game, p.name + " 触发并弃置归途传承印，三项属性各永久 +1。");
+    removeGear(p, "l13");
   }
 }
 
@@ -286,7 +304,7 @@ function respawn(game, p, duel = false) {
   p.movePenalty = 0;
   log(game, p.name + " 在起点以 10 点生命重生。");
   phase(game, "end");
-  if (!duel && !lostSeal && p.gear.some((id) => id.startsWith("l"))) {
+  if (!duel && !lostSeal && p.gear.some(legendary)) {
     if (equipped(p, "c16")) {
       removeGear(p, "c16");
       log(game, "替偿木偶代替传说装备被弃置。");
@@ -323,11 +341,11 @@ function draw(game, type, count, rng) {
   return result;
 }
 
-function offer(game, p, ids) {
+function offer(game, p, ids, canPass = false) {
   if (!ids.length) {
     log(game, "牌池暂时没有可领取的卡牌。");
     phase(game, "end");
-  } else phase(game, "offer", { ids }, p.id);
+  } else phase(game, "offer", { ids, canPass }, p.id);
 }
 
 function conflictingCharm(p, card) {
@@ -385,6 +403,11 @@ function settleBattle(game, outcome, rng) {
     if (loser.gear.length + loser.items.length)
       phase(game, "loot", { loser: loser.id }, winner.id);
   } else if (outcome.type === "escape") {
+    if (b.monster === "final") {
+      log(game, p.name + " 逃离最终头目，按战败结算。");
+      respawn(game, p);
+      return;
+    }
     if (tile.monster === b.monster) {
       tile.monsterState = outcome.monsterState || { hp: outcome.monsterHp };
       tile.hp = outcome.monsterHp;
@@ -459,7 +482,7 @@ function resolveSpace(game, p, rng) {
       const isItem = tile.type === "item";
       const count = 3 + Number(equipped(p, isItem ? "c15" : "c14"));
       const tier = isItem ? "i" : tile.type === "legendaryChest" ? "l" : "c";
-      offer(game, p, draw(game, tier, count, rng));
+      offer(game, p, draw(game, tier, count, rng), true);
       return;
     }
     case "portal":
@@ -469,6 +492,13 @@ function resolveSpace(game, p, rng) {
       return;
     case "rest":
       phase(game, "rest");
+      return;
+    case "trap":
+      if (p.sp > 0) {
+        p.sp--;
+        log(game, p.name + " 触发陷阱，失去 1 点未分配技能点。");
+      } else log(game, p.name + " 触发陷阱，但没有未分配的技能点。");
+      phase(game, "end");
       return;
     default:
       phase(game, "end");
@@ -902,9 +932,12 @@ function actions(game, id) {
       case "spend":
         return [...statOptions("upgrade"), action("cancel", "取消")];
       case "offer":
-        return game.pending.ids.map((card) =>
-          action("take:" + card, nameOf(card), card),
-        );
+        return [
+          ...game.pending.ids.map((card) =>
+            action("take:" + card, nameOf(card), card),
+          ),
+          ...(game.pending.canPass ? [action("passOffer", "放弃领取")] : []),
+        ];
       case "replace": {
         const card = game.pending.card,
           forced = conflictingCharm(p, card);
@@ -929,7 +962,7 @@ function actions(game, id) {
       }
       case "deathDiscard":
         return p.gear
-          .filter((c) => c.startsWith("l"))
+          .filter(legendary)
           .map((c) => action("discard:" + c, "弃置" + nameOf(c), c));
       default:
         return [];
@@ -1023,6 +1056,7 @@ export function act(game, playerId, actionId, rng = Math.random) {
       receive(game, p, game.pending.card, choice);
       break;
     case "decline":
+    case "passOffer":
       phase(game, "end");
       break;
     case "discard":
@@ -1183,6 +1217,9 @@ export function view(game, id) {
       "remaining",
       "side",
       "shield",
+      "shieldMax",
+      "baseAtk",
+      "rageBonus",
       "slimes",
     ];
     battle = Object.fromEntries(
