@@ -95,7 +95,6 @@ export const tiles = {
   rest: ["休息", "rest", "#ac7837"],
   duel: ["决斗", "duel", "#a54755"],
   trap: ["陷阱 · 永久升级 −1", "skull", "#9b381e"],
-  plain: ["路途", "step", "#78866a"],
 };
 export const hearts = (hp, max = 10) =>
   '<span class="hearts" aria-label="生命 ' +
@@ -348,7 +347,7 @@ export function board(g) {
     g.board
       .map((t, i) => {
         const region = regions.find((r) => r[0] === t.biome) || regions[0];
-        const kind = tiles[t.type] || tiles.plain;
+        const kind = tiles[t.type];
         const residents = g.players.filter((p) => p.pos === i + 1);
         const reverse = Math.floor(i / 10) % 2;
         const label =
@@ -371,9 +370,8 @@ export function board(g) {
           ";grid-column:" +
           (reverse ? 10 - (i % 10) : (i % 10) + 1);
         return (
-          '<button class="tile ' +
-          (residents.length ? "occupied " : "") +
-          (t.type === "plain" ? "road" : "site") +
+          '<button class="tile site' +
+          (residents.length ? " occupied" : "") +
           (t.type === "legendaryChest" ? " legendary-chest" : "") +
           (t.type === "trap" ? " trap-space" : "") +
           '" data-tile="' +
@@ -388,8 +386,7 @@ export function board(g) {
           (i + 1) +
           '</small><img class="terrain-art" alt="" src="./assets/tiles/' +
           pic +
-          '.jpg">' +
-          (t.type !== "plain" ? '<i class="type-dot"></i>' : "") +
+          '.jpg"><i class="type-dot"></i>' +
           (t.type === "legendaryChest"
             ? '<span class="terrain-dot" aria-hidden="true">✦</span>'
             : "") +

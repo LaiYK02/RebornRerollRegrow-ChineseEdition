@@ -30,7 +30,7 @@ const capHP = (p, amount) => {
 const itemLimit = (p) => (equipped(p, "l16") ? Infinity : 5);
 const action = (id, label, card) =>
   card ? { id, label, card } : { id, label };
-const rulesVersion = 4;
+const rulesVersion = 5;
 
 function log(game, message) {
   game.log.push(message);
@@ -42,20 +42,22 @@ function board() {
     const biome = ["plain", "desert", "rainforest", "volcano"][
       Math.floor(i / 25)
     ];
-    return { pos: i + 1, type: "plain", biome, terrain: biome };
+    return { pos: i + 1, biome, terrain: biome };
   });
   const spaces = {
     start: [1],
     finish: [100],
-    normal: [4, 9, 13, 14, 22, 25, 27, 28, 34, 36, 40, 41, 44, 46, 53, 61, 71],
+    normal: [
+      4, 9, 13, 14, 22, 25, 27, 28, 34, 36, 40, 41, 44, 46, 53, 61, 63, 71,
+    ],
     elite: [19, 38, 49, 50, 59, 64, 66, 72, 74, 81, 84, 86, 91, 94, 96],
     boss: [32, 43, 54, 69, 78, 87, 98],
-    chest: [6, 17, 29, 39, 51, 62, 73],
+    chest: [6, 10, 17, 29, 39, 51, 62, 73],
     legendaryChest: [82, 92],
-    item: [3, 12, 23, 31, 42, 52, 65, 75, 83, 93],
-    rest: [8, 18, 26, 37, 48, 58, 68, 77, 88, 97],
+    item: [3, 12, 23, 31, 42, 52, 65, 75, 80, 83, 93],
+    rest: [2, 8, 18, 26, 37, 48, 58, 68, 77, 88, 97],
     duel: [7, 11, 16, 20, 24, 35, 47, 55, 57, 67, 70, 79, 89, 95],
-    trap: [21, 30, 56, 85, 99],
+    trap: [5, 21, 30, 56, 85, 99],
     portal: [15, 33, 45, 60, 76, 90],
   };
   for (const [type, positions] of Object.entries(spaces)) {
@@ -78,6 +80,7 @@ function board() {
 
 export function restoreGame(game, rng = Math.random) {
   const oldRules = game.rulesVersion !== rulesVersion;
+  const legacyCombat = (game.rulesVersion ?? 0) < 4;
   const layout = oldRules ? board() : null;
   let wasLegacyBoard = false;
   for (const tile of game.board) {
@@ -105,7 +108,7 @@ export function restoreGame(game, rng = Math.random) {
       delete tile.monsterState;
     }
   }
-  if (oldRules) {
+  if (legacyCombat) {
     game.upgrades ??= [];
     for (const p of game.players) {
       p.statuses = p.statuses.filter((status) => status.type !== "slipped");
@@ -124,7 +127,7 @@ export function restoreGame(game, rng = Math.random) {
     }
     if (game.check) showRoll(game, player(game, game.actor));
   }
-  if ((wasLegacyBoard || oldRules) && game.phase === "offer") {
+  if ((wasLegacyBoard || legacyCombat) && game.phase === "offer") {
     const p = player(game);
     const tile = tileAt(game, p);
     if (tile.type === "chest" || tile.type === "legendaryChest") {
@@ -139,6 +142,11 @@ export function restoreGame(game, rng = Math.random) {
       else game.pending.canPass = true;
     }
     if (tile.type === "item") game.pending.canPass = true;
+  }
+  if (game.rulesVersion === 4) {
+    migrateMonsterReward(game, player(game, game.actor), game, rng);
+    for (const p of game.players)
+      if (p.resume) migrateMonsterReward(game, p, p.resume, rng);
   }
   const b = game.battle;
   if (b?.monster) {
@@ -160,7 +168,7 @@ export function restoreGame(game, rng = Math.random) {
       }
     }
   }
-  if (oldRules && b) {
+  if (legacyCombat && b) {
     const tile = tileAt(game, player(game, b.first));
     restoreBattleRules(game, tile.biome);
     if (tile.monster === b.monster) {
@@ -332,10 +340,7 @@ function respawn(game, p, { duel = false, escaped = false } = {}) {
   p.hp = 10;
   p.statuses = [];
   p.movePenalty = 0;
-  if (!escaped) {
-    log(game, p.name + " 在起点以 10 点生命重生。");
-    grantUpgrade(game, p);
-  }
+  if (!escaped) log(game, p.name + " 在起点以 10 点生命重生。");
   phase(game, "end");
   if (!duel && !lostSeal && p.gear.some(legendary)) {
     if (equipped(p, "c16")) {
@@ -349,6 +354,28 @@ function randomOne(array, rng) {
   return array[Math.min(array.length - 1, Math.floor(rng() * array.length))];
 }
 
+function awardMonsterUpgrade(game, p, rng) {
+  const stat = randomOne(Object.keys(stats), rng);
+  upgrade(p, stat);
+  log(game, p.name + " 获得随机升级，" + stats[stat] + " +1。");
+}
+
+function migrateMonsterReward(game, p, state, rng) {
+  if (state.phase !== "offer" && state.phase !== "replace") return;
+  const tile = tileAt(game, p);
+  if (tile.type !== "elite" && tile.type !== "boss") return;
+  const pending = state.pending;
+  const isItemReward =
+    state.phase === "replace"
+      ? pending.card.startsWith("i")
+      : pending.ids.every((id) => id.startsWith("i"));
+  awardMonsterUpgrade(game, p, rng);
+  if (isItemReward) {
+    state.phase = "end";
+    state.pending = {};
+  } else delete pending.followup;
+}
+
 function draw(game, type, count, rng) {
   const options = pool(type).flatMap((id) => {
     const stock = cards[id].copies ?? 1;
@@ -357,10 +384,7 @@ function draw(game, type, count, rng) {
         (x) => x === id,
       ).length;
       const saved = q.resume?.pending;
-      const reserved =
-        saved?.ids?.includes(id) ||
-        saved?.followup?.includes(id) ||
-        saved?.card === id;
+      const reserved = saved?.ids?.includes(id) || saved?.card === id;
       return sum + owned + Number(Boolean(reserved));
     }, 0);
     return Array(Math.max(0, stock - held)).fill(id);
@@ -375,18 +399,11 @@ function draw(game, type, count, rng) {
   return result;
 }
 
-function offer(game, p, ids, canPass = false, followup) {
+function offer(game, p, ids, canPass = false) {
   if (!ids.length) {
     log(game, "牌池暂时没有可领取的卡牌。");
-    if (followup?.length) offer(game, p, followup, true);
-    else phase(game, "end");
-  } else phase(game, "offer", { ids, canPass, followup }, p.id);
-}
-
-function finishOffer(game, p) {
-  const { followup } = game.pending;
-  if (followup?.length) offer(game, p, followup, true);
-  else phase(game, "end");
+    phase(game, "end");
+  } else phase(game, "offer", { ids, canPass }, p.id);
 }
 
 function conflictingCharm(p, card) {
@@ -405,7 +422,7 @@ function receive(game, p, card, replacing) {
       ? p.items.length >= itemLimit(p)
       : p.gear.length >= 3 || conflictingCharm(p, card)
   ) {
-    phase(game, "replace", { card, followup: game.pending.followup }, p.id);
+    phase(game, "replace", { card }, p.id);
     return;
   }
   if (isItem) p.items.push(card);
@@ -415,7 +432,7 @@ function receive(game, p, card, replacing) {
     game,
     p.name + (isItem ? " 收下了一件道具。" : " 装备了" + nameOf(card) + "。"),
   );
-  finishOffer(game, p);
+  phase(game, "end");
 }
 
 function startFight(game, options, rng) {
@@ -463,16 +480,17 @@ function settleBattle(game, outcome, rng) {
     phase(game, "won", {}, p.id);
     log(game, p.name + " 击败原初之王，赢得本局！");
   } else if (outcome.type === "monsterWin") {
-    const tier =
-      b.monster[0] === "n" ? "normal" : b.monster[0] === "e" ? "elite" : "boss";
     if (tile.boss) tile.monster = tile.boss;
     else delete tile.monster;
     delete tile.hp;
     delete tile.maxHp;
     delete tile.monsterState;
     log(game, p.name + " 击败怪物。");
-    if (tier === "normal") offer(game, p, draw(game, "i", 1, rng));
-    else offer(game, p, draw(game, "l", 3, rng), true, draw(game, "i", 3, rng));
+    if (b.monster.startsWith("n")) offer(game, p, draw(game, "i", 1, rng));
+    else {
+      awardMonsterUpgrade(game, p, rng);
+      offer(game, p, draw(game, "l", 3, rng), true);
+    }
   }
 }
 
@@ -1123,7 +1141,7 @@ export function act(game, playerId, actionId, rng = Math.random) {
       break;
     case "decline":
     case "passOffer":
-      finishOffer(game, p);
+      phase(game, "end");
       break;
     case "discard":
       removeGear(game, p, choice);

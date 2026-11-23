@@ -83,7 +83,7 @@ test("休息格掷出 4 时既不升级也不回血", () => {
   assert.equal(p.hp, 4);
 });
 
-test("怪物战确认放弃才会死亡回城，必须分配升级并处理弃牌", () => {
+test("怪物战确认放弃才会死亡回城，保留弃牌流程且没有升级", () => {
   const g = solo(),
     [p] = g.players;
   p.pos = 3;
@@ -101,10 +101,9 @@ test("怪物战确认放弃才会死亡回城，必须分配升级并处理弃�
   assert.equal(p.pos, 1);
   assert.equal(p.hp, 10);
   assert.equal(g.battle, null);
-  assert.equal(view(g, p.id).phase, "upgrade");
-  assert.throws(() => choose(g, "discard:l02"));
-  step(g, "upgrade:act");
-  assert.equal(p.act, 2);
+  assert.equal(view(g, p.id).phase, "deathDiscard");
+  assert.equal(g.upgrades.length, 0);
+  assert.deepEqual(p.alloc, { atk: 0, def: 0, act: 0 });
   step(g, "discard:l02");
   assert.deepEqual(p.gear, []);
 });
@@ -126,6 +125,34 @@ test("旧存档的未分配升级必须逐次分配，保留原卡和已升属�
   assert.deepEqual([p.atk, p.def, p.act], [2, 2, 2]);
   assert.deepEqual(p.items, ["i03"]);
   assert.equal(view(g, p.id).phase, "move");
+});
+
+test("旧棋盘空格更新为功能格，未领取的精英和头目道具奖励改为一次随机升级", () => {
+  const g = pair(),
+    [p, q] = g.players;
+  g.rulesVersion = 4;
+  for (const pos of [2, 5, 10, 63, 80]) g.board[pos - 1].type = "plain";
+  g.board[62].banana = true;
+  p.pos = 19;
+  g.phase = "offer";
+  g.pending = { ids: ["l01", "l02", "l03"], canPass: true, followup: ["i01"] };
+  q.pos = 32;
+  q.resume = { phase: "replace", pending: { card: "i02" } };
+  restoreGame(g, die(4));
+  assert.deepEqual(
+    [2, 5, 10, 63, 80].map((pos) => g.board[pos - 1].type),
+    ["rest", "trap", "chest", "normal", "item"],
+  );
+  assert.equal(g.board[62].banana, true);
+  assert.equal(p.def, 2);
+  assert.equal(q.def, 2);
+  assert.equal(q.resume.phase, "end");
+  assert.deepEqual(ids(g), ["take:l01", "take:l02", "take:l03", "passOffer"]);
+  restoreGame(g, die(6));
+  assert.equal(p.act, 1);
+  assert.equal(q.act, 1);
+  step(g, "passOffer");
+  assert.equal(g.phase, "end");
 });
 
 test("沙漠同格先交锋，只由挑战者结算落点", () => {
@@ -186,6 +213,21 @@ test("the board has 100 positions, symmetric portals and 25 active tiles per ter
   );
   assert.equal(g.board[0].type, "start");
   assert.equal(g.board.at(-1).type, "finish");
+  const assignedTypes = [
+    "start",
+    "finish",
+    "normal",
+    "elite",
+    "boss",
+    "chest",
+    "legendaryChest",
+    "item",
+    "rest",
+    "duel",
+    "trap",
+    "portal",
+  ];
+  assert.ok(g.board.every((tile) => assignedTypes.includes(tile.type)));
   assert.equal(g.board[6].type, "duel");
   assert.equal(g.board[15].type, "duel");
   const bosses = g.board.filter((t) => t.type === "boss");
@@ -382,11 +424,13 @@ test("terrain, traps, portals, heals and rest upgrades resolve at their proper t
   q.hp = 5;
   step(h, "roll", die(1));
   assert.equal(q.hp, 4);
+  step(h, "passOffer");
   step(h, "end");
   q.pos = 79;
   q.gear.push("l10", "l11");
   step(h, "roll", die(1));
   assert.equal(q.hp, 5);
+  step(h, "passOffer");
   step(h, "end");
   q.pos = 32;
   step(h, "roll", die(2));
@@ -398,6 +442,7 @@ test("terrain, traps, portals, heals and rest upgrades resolve at their proper t
   step(h, "roll", die(1));
   assert.equal(q.pos, 2);
   assert.equal(h.board[1].banana, undefined);
+  step(h, "heal");
   step(h, "end");
   step(h, "roll", die(6));
   assert.equal(q.pos, 8);
@@ -436,8 +481,7 @@ test("barricades, ties in same-space clashes and duels at distant sites", () => 
   for (let i = 0; i < 20 && j.battle; i++) step(j, ids(j)[0], die(3));
   assert.equal(j.phase, "loot");
   assert.equal(j.actor, "b");
-  assert.equal(actor(j), "a");
-  step(j, "upgrade:def");
+  assert.deepEqual(c.alloc, { atk: 0, def: 0, act: 0 });
   assert.equal(actor(j), "b");
   step(j, "upgrade:atk");
   assert.equal(c.pos, 1);
@@ -487,13 +531,14 @@ test("monster damage persists on escape, resets on death and grants all tier rew
   assert.equal(p.hp, 10);
   assert.equal(g.board[18].hp, 3);
   assert.equal(g.phase, "deathDiscard");
-  step(g, "upgrade:def");
+  assert.equal(g.upgrades.length, 0);
   step(g, "discard:l08");
   assert.deepEqual(p.gear, ["l03"]);
-  for (const [pos, tier] of [
-    [4, "normal"],
-    [19, "elite"],
-    [32, "boss"],
+  for (const [pos, tier, rng, expected] of [
+    [4, "normal", die(2), { atk: 0, def: 0, act: 0 }],
+    [19, "elite", die(2), { atk: 1, def: 0, act: 0 }],
+    [19, "elite", die(3), { atk: 0, def: 1, act: 0 }],
+    [32, "boss", die(5), { atk: 0, def: 0, act: 1 }],
   ]) {
     const h = solo(),
       [q] = h.players;
@@ -502,18 +547,23 @@ test("monster damage persists on escape, resets on death and grants all tier rew
     q.act = 12;
     step(h, "roll", die(pos > 25 ? 2 : 1));
     assert.equal(h.board[pos - 1].type, tier);
-    for (let i = 0; i < 40 && h.battle; i++) step(h, ids(h)[0], die(2));
+    for (let i = 0; i < 40 && h.battle; i++) step(h, ids(h)[0], rng);
     assert.equal(h.phase, "offer");
     assert.equal(h.upgrades.length, 0);
+    assert.deepEqual(q.alloc, expected);
     const offered = () =>
       view(h, "a").actions.flatMap((a) => (a.card ? [a.card] : []));
     if (tier !== "normal") {
       assert.equal(offered().length, 3);
       assert.ok(offered().every((id) => cards[id].kind === "传说装备"));
       step(h, "passOffer");
-      assert.equal(offered().length, 3);
+      assert.equal(h.phase, "end");
+      assert.equal(offered().length, 0);
+      assert.deepEqual(q.items, []);
+    } else {
+      assert.equal(offered().length, 1);
+      assert.ok(offered().every((id) => cards[id].kind === "道具"));
     }
-    assert.ok(offered().every((id) => cards[id].kind === "道具"));
     assert.equal(h.board[pos - 1].monster, h.board[pos - 1].boss);
   }
 });
@@ -589,6 +639,7 @@ test("returning to Start, legendary sacrifice, lock immunity, cleanses and redis
   step(h, "roll", die(1));
   assert.deepEqual(b.gear, ["l02"]);
   assert.equal(b.hp, 10);
+  assert.deepEqual(b.alloc, { atk: 0, def: 0, act: 0 });
   const k = solo(),
     [c] = k.players;
   c.pos = 79;
@@ -706,6 +757,7 @@ test("a disconnected player can resume a private choice or a wounded monster", (
   assert.equal(view(g, "b").players[0].items, undefined);
   setOnline(g, "a", true);
   step(g, "roll", die(1));
+  step(g, "heal");
   step(g, "end");
   assert.deepEqual(ids(g), choices);
   step(g, choices[0]);
@@ -723,6 +775,7 @@ test("a disconnected player can resume a private choice or a wounded monster", (
   a.pos = 1;
   step(g, "roll", die(1));
   if (g.phase === "landing") step(g, "resolve");
+  step(g, "heal");
   step(g, "end");
   assert.equal(g.battle.hp, 2);
   assert.equal(g.battle.actors[0], "b");

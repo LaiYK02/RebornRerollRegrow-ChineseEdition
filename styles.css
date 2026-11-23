@@ -1502,10 +1502,6 @@ body {
     transparent 98%
   );
 }
-.tile.road .terrain-art {
-  height: 83%;
-  opacity: 0.72;
-}
 .tile.site {
   box-shadow: inset 0 -2px color-mix(in srgb, var(--mark) 70%, transparent);
   background: color-mix(in srgb, var(--zone) 85%, #fff5d8);
