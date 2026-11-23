@@ -120,43 +120,20 @@ export const button = (cmd, label, ic = "", classes = "soft", extra = "") =>
   (ic ? icon(ic) : "") +
   label +
   "</button>";
-function showcard(id, side, label, title, number, hp, def) {
+function knightShowcard() {
   return (
-    '<button class="showcard ' +
-    side +
-    '" data-detail="' +
-    id +
-    '" aria-label="查看' +
-    title +
-    '"><div class="card-inner"><div class="card-art">' +
-    art(id) +
+    '<button type="button" class="showcard" data-detail="knight" aria-label="查看初始骑士"><div class="card-inner"><div class="card-art">' +
+    art("knight") +
     '<span class="corner">' +
     icon("sword") +
-    '</span><span class="corner defense">' +
-    def +
-    '</span></div><div class="card-info"><small>' +
-    label +
-    "</small><h3>" +
-    title +
-    '</h3><div class="card-meta">' +
-    hearts(hp, hp) +
-    "<small>" +
-    number +
-    "</small></div></div></div></button>"
+    '</span><span class="corner defense">1</span></div><div class="card-info"><small>角色卡 · 骑士</small><h3>初始骑士</h3><div class="card-meta">' +
+    hearts(10) +
+    "<small>HERO / 01</small></div></div></div></button>"
   );
 }
 export function menu(profile, resume) {
   return (
-    '<section class="menu"><div class="hero-title"><div class="pretitle">重生之我靠</div><h1>回城变强</h1><div class="subtitle"><em></em>区域网卡牌桌游 · 1–4 人<em></em></div></div><div class="camp">' +
-    showcard(
-      "knight",
-      "left",
-      "角色卡 · 骑士",
-      "初始骑士",
-      "HERO / 01",
-      10,
-      1,
-    ) +
+    '<section class="menu"><div class="hero-title"><h1><span class="pretitle">重生之</span><span class="title-main">我靠回城变强</span></h1><div class="subtitle"><em></em>区域网卡牌桌游 · 1–4 人<em></em></div></div><div class="camp">' +
     '<section class="setup paper"><div class="setup-title"><h2>' +
     icon("knight") +
     '冒险者营地</h2><span class="lan-dot">LAN</span></div><label class="field-label" for="pname">骑士名字</label><div class="name-field"><input id="pname" maxlength="16" autocomplete="off" value="' +
@@ -185,15 +162,7 @@ export function menu(profile, resume) {
     button("join", "加入房间", "door", "cta join") +
     button("solo", resume ? "继续单人冒险" : "单人试炼", "", "sub-action") +
     "</section>" +
-    showcard(
-      "e03",
-      "right",
-      "怪物卡 · 精英",
-      "精英史莱姆",
-      "ELITE / 03",
-      5,
-      2,
-    ) +
+    knightShowcard() +
     '</div><footer class="trail"><div class="trail-label">' +
     icon("map") +
     "冒险路线</div>" +

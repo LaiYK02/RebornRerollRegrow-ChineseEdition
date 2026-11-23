@@ -203,10 +203,16 @@ nav .utility {
   box-shadow: 0 2px #f8e9ba;
 }
 .hero-title h1 {
+  margin: 0;
+}
+.title-main {
+  display: block;
+  width: max-content;
+  margin-inline: auto;
+  white-space: nowrap;
   font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
   font-size: clamp(67px, 7.3vw, 118px);
   letter-spacing: 0.025em;
-  margin: 0;
   line-height: 1.19;
   font-weight: 1000;
   color: #ffd367;
@@ -256,6 +262,7 @@ nav .utility {
     0 12px 30px #27372736;
 }
 .setup {
+  grid-column: 2;
   position: relative;
   background: linear-gradient(125deg, #fffbed, #fff0ce);
   padding: 19px 24px 22px;
@@ -404,13 +411,15 @@ nav .utility {
   text-underline-offset: 3px;
 }
 .showcard {
+  --tilt: 10deg;
+  grid-column: 3;
   position: relative;
   width: clamp(180px, 16.9vw, 250px);
   justify-self: center;
   padding: 8px;
   text-align: left;
   transform: rotate(var(--tilt));
-  background: var(--cardbg);
+  background: #b6d8d6;
   box-shadow:
     0 5px 0 #31413e,
     4px 15px 19px #172e263e;
@@ -418,14 +427,6 @@ nav .utility {
 }
 .showcard:hover {
   transform: translateY(-6px) rotate(calc(var(--tilt) * 0.65));
-}
-.showcard.left {
-  --tilt: -10deg;
-  --cardbg: #b6d8d6;
-}
-.showcard.right {
-  --tilt: 10deg;
-  --cardbg: #ffda80;
 }
 .card-inner {
   border: 1.5px solid #34433c;
@@ -1234,7 +1235,7 @@ nav .utility {
     width: 94vw;
   }
   .showcard {
-    width: 100%;
+    width: 85%;
   }
   .setup {
     padding: 15px;
@@ -1267,9 +1268,8 @@ nav .utility {
     display: none;
   }
 }
-@media (max-width: 620px) {
+@media (max-width: 720px) {
   header {
-    height: 56px;
     padding: 0 10px;
   }
   header .brand {
@@ -1301,14 +1301,19 @@ nav .utility {
   nav .utility {
     width: 27px;
   }
+}
+@media (max-width: 620px) {
+  header {
+    height: 56px;
+  }
   .menu {
     min-height: calc(100svh - 56px);
   }
   .hero-title {
     padding-top: 24px;
   }
-  .hero-title h1 {
-    font-size: 67px;
+  .title-main {
+    font-size: min(67px, 14vw);
   }
   .hero-title .subtitle {
     font-size: 10px;
@@ -1318,8 +1323,15 @@ nav .utility {
     margin: 22px auto 26px;
     width: min(350px, 88vw);
   }
-  .showcard {
-    display: none;
+  .camp .setup,
+  .camp .showcard {
+    grid-column: 1;
+  }
+  .camp .showcard {
+    --tilt: 6deg;
+    width: min(170px, 54%);
+    justify-self: end;
+    margin-inline-end: 12px;
   }
   .setup {
     padding: 16px 20px;
@@ -1450,6 +1462,19 @@ nav .utility {
     padding: 13px;
   }
 }
+@media (max-width: 450px) {
+  body:has(.menu) {
+    min-width: 0;
+  }
+  header .brand {
+    font-size: 14px;
+    letter-spacing: 0;
+  }
+  nav button[data-do="atlas"] span,
+  nav button[data-do="rules"] span {
+    display: none;
+  }
+}
 @media (prefers-reduced-motion: reduce) {
   *,
   *:before,
@@ -1457,11 +1482,6 @@ nav .utility {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
-}
-.hero-title h1 {
-  width: max-content;
-  max-width: 100%;
-  margin-inline: auto;
 }
 body {
   overflow-x: clip;
@@ -1799,7 +1819,7 @@ body {
   .hero-title {
     padding-top: 14px;
   }
-  .hero-title h1 {
+  .title-main {
     font-size: clamp(62px, 6.5vw, 90px);
   }
   .hero-title .subtitle {
@@ -1853,7 +1873,7 @@ body {
     font-size: 9px;
   }
 }
-.showcard.left .hearts {
+.showcard .hearts {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
   gap: 0 2px;
