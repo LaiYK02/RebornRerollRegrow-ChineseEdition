@@ -13,7 +13,9 @@ import {
   lobby,
   game,
   board,
+  actionItem,
   chatMessages,
+  dieCube,
   diceLayout,
   pawns,
   parityLabel,
@@ -61,6 +63,7 @@ let snapshot = "",
   playback = null,
   shownWinner = null,
   diceAnimation = null,
+  handSelection = null,
   reminderTimer,
   reminderKey = "",
   previousFocus = null,
@@ -198,7 +201,7 @@ function atlas(filter = "全部") {
     "atlas",
   );
 }
-function detail(id, back = false, actionId) {
+function detail(id, back = false, actionId, showActions = true) {
   const c =
     cards[id] ||
     (id === "knight"
@@ -213,9 +216,11 @@ function detail(id, back = false, actionId) {
         }
       : null);
   if (!c) return;
-  const actions = (room?.game?.actions || []).filter(
-    (a) => a.card === id && (!actionId || a.id === actionId),
-  );
+  const actions = showActions
+    ? (room?.game?.actions || []).filter(
+        (a) => a.card === id && (!actionId || a.id === actionId),
+      )
+    : [];
   modal(
     c.name,
     '<div class="entry-detail">' +
@@ -469,24 +474,53 @@ function soloStart(reset = false) {
 }
 function renderRoom(displayGame = room?.game, combatResolving = false) {
   if (!room) return;
-  const chatInput = $("#chat input"),
+  const focused = document.activeElement,
+    focusPanel = focused?.closest(".field-panel summary")?.parentElement.id,
+    focusHand = focused?.closest(".hand-card")?.dataset.itemIndex,
+    chatInput = $("#chat input"),
     textValue = chatInput?.value,
-    focus = document.activeElement === chatInput,
+    focus = focused === chatInput,
     selection = chatInput?.selectionStart;
   const oldChat = $(".chat-msg"),
     chatAtEnd = atEnd(oldChat),
     scroll = oldChat?.scrollTop,
-    logTop = $(".logbox")?.scrollTop;
+    logTop = $(".logbox")?.scrollTop,
+    handScroll = $(".item-hand")?.scrollLeft,
+    openPanels = [...app.querySelectorAll(".field-panel[open]")].map(
+      (panel) => panel.id,
+    );
   app.innerHTML = displayGame
-    ? game({ ...room, game: displayGame }, !!soloState, combatResolving)
+    ? game(
+        { ...room, game: displayGame },
+        !!soloState,
+        combatResolving,
+        handSelection,
+      )
     : lobby(room);
-  if (controlsLocked()) $(".action-row")?.setAttribute("inert", "");
+  if (controlsLocked()) {
+    $(".action-row")?.setAttribute("inert", "");
+    $(".exit-dock")?.setAttribute("inert", "");
+  }
+  for (const id of openPanels) {
+    const panel = document.getElementById(id);
+    if (panel) panel.open = true;
+  }
+  if (handScroll && $(".item-hand")) $(".item-hand").scrollLeft = handScroll;
   document.body.classList.toggle("playing", !!room.game);
   const input = $("#chat input");
   if (input && textValue) input.value = textValue;
   if (focus && input) {
     input.focus({ preventScroll: true });
     input.setSelectionRange(selection, selection);
+  } else if (focusPanel) {
+    document
+      .getElementById(focusPanel)
+      ?.querySelector("summary")
+      ?.focus({ preventScroll: true });
+  } else if (focusHand !== undefined) {
+    $('.hand-card[data-item-index="' + focusHand + '"]')?.focus({
+      preventScroll: true,
+    });
   }
   const next = $(".chat-msg");
   if (next) next.scrollTop = chatAtEnd ? next.scrollHeight : scroll;
@@ -509,6 +543,7 @@ function cancelPlayback() {
   playback = null;
   visualQueue.length = 0;
   diceAnimation?.();
+  handSelection = null;
   combatSequence = 0;
   shownWinner = null;
 }
@@ -693,7 +728,6 @@ async function animateDice(dice, signal) {
   const pager = panel.querySelector(".dice-pager");
   const [previous, next, closeDice] = pager.querySelectorAll("button");
   const pageNumber = pager.querySelector("span");
-  const glyphs = "⚀⚁⚂⚃⚄⚅";
   let pageSize = 1,
     page = 0,
     tick = 0,
@@ -709,14 +743,13 @@ async function animateDice(dice, signal) {
       const n = revealed
         ? dice.values[page * pageSize + i]
         : 1 + ((tick + i) % 6);
-      faces.children[i].textContent = glyphs[n - 1];
+      faces.children[i].dataset.face = n;
     }
   };
   function drawPage() {
     const length = Math.min(pageSize, dice.values.length - page * pageSize);
-    faces.replaceChildren(
-      ...Array.from({ length }, () => document.createElement("span")),
-    );
+    if (faces.childElementCount !== length)
+      faces.innerHTML = dieCube.repeat(length);
     pager.hidden = !revealed || pageCount() < 2;
     previous.disabled = page === 0;
     next.disabled = page >= pageCount() - 1;
@@ -1068,6 +1101,19 @@ function confirmation(route) {
       button("close", "取消", "", "cta"),
   );
 }
+async function submitAction(actionId) {
+  if (
+    busy ||
+    controlsLocked() ||
+    !room?.game?.actions.some((a) => a.id === actionId)
+  )
+    return;
+  diceAnimation?.();
+  handSelection = null;
+  tone(495);
+  close();
+  await request("action", { actionId, revision: room.revision });
+}
 async function click(e) {
   const b = e.target.closest("button");
   if (!b) return;
@@ -1084,6 +1130,28 @@ async function click(e) {
     }
     if (d.filter) {
       atlas(d.filter);
+      return;
+    }
+    if (d.handItem) {
+      if (controlsLocked() || busy) return;
+      const card = d.handItem;
+      const index = Number(d.itemIndex);
+      const g = room?.game;
+      const menu = g?.itemMenu || g?.battle?.itemMenu;
+      const options = (g?.actions || []).filter((a) => actionItem(a) === card);
+      if (menu || !options.length) {
+        detail(card, false, undefined, false);
+      } else if (options.length === 1 && options[0].opensItemMenu) {
+        await submitAction(options[0].id);
+        $(".actions [data-action]")?.focus({ preventScroll: true });
+      } else {
+        handSelection = handSelection?.index === index ? null : { card, index };
+        renderRoom();
+        const focus = handSelection
+          ? $(".actions [data-action]")
+          : $('.hand-card[data-item-index="' + index + '"]');
+        focus?.focus({ preventScroll: true });
+      }
       return;
     }
     if (d.detail) {
@@ -1135,15 +1203,7 @@ async function click(e) {
       }
     }
     if (d.action) {
-      if (!busy) {
-        diceAnimation?.();
-        tone(495);
-        close();
-        await request("action", {
-          actionId: d.action,
-          revision: room.revision,
-        });
-      }
+      await submitAction(d.action);
       return;
     }
     const k = d.do;
@@ -1151,6 +1211,19 @@ async function click(e) {
     if (!["sound", "close"].includes(k)) tone();
     if (k === "close") {
       close();
+      return;
+    }
+    if (k === "inspectHand") {
+      detail(d.card, false, undefined, false);
+      return;
+    }
+    if (k === "cancelHand") {
+      const index = handSelection?.index;
+      handSelection = null;
+      renderRoom();
+      $('.hand-card[data-item-index="' + index + '"]')?.focus({
+        preventScroll: true,
+      });
       return;
     }
     if (k === "atlas" || k === "backAtlas") {
@@ -1276,6 +1349,17 @@ app.addEventListener("change", (e) => {
   }
 });
 document.addEventListener("click", click);
+app.addEventListener(
+  "toggle",
+  (e) => {
+    const panel = e.target;
+    if (!panel.matches(".field-panel[open]")) return;
+    for (const other of app.querySelectorAll(".field-panel[open]")) {
+      if (other !== panel) other.open = false;
+    }
+  },
+  true,
+);
 document.addEventListener("submit", async (e) => {
   e.preventDefault();
   try {

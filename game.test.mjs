@@ -84,8 +84,10 @@ test("踩到沙漠香蕉皮原地结算，净化可用掉香蕉皮并继续原�
   h.board[28].banana = true;
   step(h, "roll", die(4));
   assert.equal(q.pos, 29);
-  assert.ok(ids(h).includes("use:i14:banana"));
-  step(h, "use:i14:banana");
+  assert.ok(ids(h).includes("use:i14"));
+  step(h, "use:i14");
+  assert.deepEqual(q.items, ["i14"]);
+  step(h, "target:0:banana");
   assert.equal(q.pos, 31);
   assert.equal(h.phase, "offer");
   assert.deepEqual(q.items, []);
@@ -179,6 +181,196 @@ test("雨林回城道具要过判定，成功回城没有升级", () => {
   assert.equal(p.pos, 1);
   assert.deepEqual(p.items, []);
   assert.equal(g.upgrades.length, 0);
+});
+
+test("命数棱镜只翻转成败，确认后结算，雨林通过后可直接回城", () => {
+  const g = solo();
+  const p = g.players[0];
+  p.pos = 55;
+  p.items = ["i01", "i11"];
+  choose(g, "roll", die(1));
+  const before = structuredClone(g.dice);
+  assert.match(view(g, p.id).prompt, /失败/);
+  choose(g, "use:i01");
+  assert.deepEqual(g.dice, before);
+  assert.match(view(g, p.id).prompt, /成功（已反转）/);
+  assert.equal(p.pos, 55);
+  choose(g, "check:accept");
+  assert.ok(g.turnTerrain.includes("rainforest"));
+  choose(g, "use:i11", () => {
+    throw Error("already cleared rainforest");
+  });
+  assert.equal(p.pos, 1);
+  assert.deepEqual(p.items, []);
+
+  for (const [face, earns] of [
+    [1, true],
+    [5, false],
+  ]) {
+    const rest = solo();
+    rest.phase = "rest";
+    rest.players[0].items = ["i01"];
+    choose(rest, "rest", die(face));
+    choose(rest, "use:i01");
+    assert.deepEqual(rest.dice.values, [face]);
+    assert.equal(rest.dice.total, face);
+    assert.equal(rest.upgrades.length, 0);
+    choose(rest, "check:accept");
+    assert.equal(rest.upgrades.length > 0, earns);
+  }
+
+  const clash = pair();
+  clash.players[0].items = ["i01"];
+  clash.players[1].pos = 2;
+  step(clash, "roll", die(1));
+  choose(clash, "clash", die(6));
+  assert.deepEqual(ids(clash), ["check:accept"]);
+});
+
+test("避灾斗篷免疫雨林、沙漠与火山，仍须结算格子与香蕉皮", () => {
+  const desert = solo();
+  desert.players[0].pos = 28;
+  desert.players[0].gear = ["l10"];
+  step(desert, "roll", die(1));
+  assert.equal(desert.players[0].pos, 29);
+  assert.equal(desert.phase, "offer");
+
+  const rain = solo();
+  rain.players[0].gear = ["l10"];
+  rain.players[0].pos = 55;
+  choose(rain, "roll", die(1));
+  assert.equal(rain.check.kind, "move");
+  choose(rain, "check:accept");
+  assert.equal(rain.players[0].pos, 56);
+  const homesick = solo();
+  homesick.players[0].pos = 55;
+  homesick.players[0].items = ["i11"];
+  homesick.players[0].gear = ["l10"];
+  choose(homesick, "use:i11", () => {
+    throw Error("immune to rainforest");
+  });
+  assert.equal(homesick.players[0].pos, 1);
+
+  const volcano = solo();
+  const p = volcano.players[0];
+  p.pos = 77;
+  p.gear = ["l10"];
+  volcano.board[79].banana = true;
+  step(volcano, "roll", die(6));
+  assert.equal(p.hp, 10);
+  assert.equal(p.pos, 80);
+  assert.equal(volcano.board[79].banana, undefined);
+  assert.equal(volcano.phase, "offer");
+});
+
+test("场外净化只在有目标时可用，大净化列出完整状态并等待确认", () => {
+  const g = pair();
+  const [p, q] = g.players;
+  p.items = ["i14", "i15"];
+  assert.ok(!ids(g).includes("use:i14"));
+  assert.ok(!ids(g).includes("use:i15"));
+  q.statuses = [{ type: "buff", label: "强化" }, { type: "stunned" }];
+  q.movePenalty = -2;
+  const bare = view(g, p.id).actions.find((a) => a.id === "use:i14");
+  assert.equal(bare.opensItemMenu, true);
+  choose(g, "use:i14");
+  assert.ok(ids(g).includes("target:1:0"));
+  assert.ok(ids(g).includes("target:1:1"));
+  assert.equal(view(g, q.id).itemMenu, null);
+  choose(g, "cancel");
+  assert.equal(view(g, p.id).itemMenu, null);
+  assert.deepEqual(p.items, ["i14", "i15"]);
+  choose(g, "use:i15");
+  choose(g, "target:1");
+  const menu = view(g, p.id).itemMenu;
+  assert.equal(menu.stage, "confirm");
+  assert.deepEqual(menu.detail, ["强化", "晕眩", "移动判定 -2"]);
+  assert.deepEqual(
+    q.statuses.map((s) => s.type),
+    ["buff", "stunned"],
+  );
+  assert.deepEqual(p.items, ["i14", "i15"]);
+  const resumed = restoreGame(JSON.parse(JSON.stringify(g)));
+  assert.deepEqual(view(resumed, p.id).itemMenu, menu);
+  choose(g, "target:1:all");
+  assert.equal(view(g, p.id).itemMenu, null);
+  assert.deepEqual(q.statuses, []);
+  assert.equal(q.movePenalty, 0);
+  assert.deepEqual(p.items, ["i14"]);
+});
+
+test("战斗重置卡逐点重分永久升级和徽章，保留基础点与本场临时点", () => {
+  const g = solo();
+  const p = g.players[0];
+  p.pos = 3;
+  p.gear = ["c13"];
+  p.badgeActive = true;
+  p.badgeStat = "act";
+  Object.assign(p, {
+    atk: 4,
+    def: 1,
+    act: 2,
+    alloc: { atk: 2, def: 0, act: 1 },
+  });
+  p.items = ["i06", "i07"];
+  step(g, "roll", die(1));
+  choose(g, "use:i07:act");
+  choose(g, "use:i06");
+  assert.deepEqual([p.atk, p.def, p.act], [2, 1, 1]);
+  assert.deepEqual(ids(g), ["upgrade:atk", "upgrade:def", "upgrade:act"]);
+  assert.equal(view(g, p.id).battle.combatants.a.act, 2);
+  choose(g, "upgrade:def");
+  choose(g, "upgrade:act");
+  choose(g, "upgrade:act");
+  assert.deepEqual([p.atk, p.def, p.act], [2, 2, 3]);
+  assert.equal(p.badgeStat, "act");
+  assert.equal(g.battle.remaining, 4);
+  assert.deepEqual(p.items, []);
+  assert.ok(ids(g).includes("attack"));
+});
+
+test("当前与暂停的旧版最终战保留伤害和抽取效果，基础点只迁移一次", () => {
+  const g = pair();
+  g.phase = "finish";
+  g.players[0].pos = 100;
+  choose(g, "challenge");
+  g.battle.hp = 9;
+  g.battle.base = { atk: 6, def: 9 };
+  const effects = [...g.battle.active];
+  g.rulesVersion = 6;
+  g.players[1].resume = {
+    phase: "resumeMonster",
+    pending: { battle: structuredClone(g.battle) },
+  };
+  restoreGame(g);
+  restoreGame(g);
+  for (const battle of [g.battle, g.players[1].resume.pending.battle]) {
+    assert.deepEqual(battle.base, { atk: 8, def: 12 });
+    assert.equal(battle.hp, 9);
+    assert.deepEqual(battle.active, effects);
+    assert.equal(battle.baseAtk, 8);
+  }
+});
+
+test("重连时先完成重置卡升级，恢复暂停战斗后使用新的攻击次数", () => {
+  const g = pair();
+  const [p] = g.players;
+  p.pos = 3;
+  p.atk = 3;
+  p.alloc.atk = 2;
+  p.items = ["i06"];
+  step(g, "roll", die(1));
+  choose(g, "use:i06");
+  setOnline(g, p.id, false);
+  assert.equal(g.turn, "b");
+  setOnline(g, p.id, true);
+  choose(g, "upgrade:act");
+  choose(g, "upgrade:act");
+  assert.equal(p.act, 3);
+  step(g, "roll", die(1));
+  step(g, "heal");
+  assert.equal(g.turn, p.id);
+  assert.equal(g.battle.remaining, 3);
 });
 
 test("休息格掷出 4 时既不升级也不回血", () => {
@@ -525,7 +717,7 @@ test("draws and unplayed items stay private and snapshots do not mutate authorit
   assert.deepEqual(g.players[0].gear, []);
 });
 
-test("movement die modifiers, golden die, reroll and fate prism resolve once", () => {
+test("movement die modifiers resolve once and a numeric movement cannot use a prism", () => {
   const g = solo(),
     [p] = g.players;
   p.gear = ["c03", "c06", "c07"];
@@ -539,14 +731,14 @@ test("movement die modifiers, golden die, reroll and fate prism resolve once", (
   assert.equal(g.dice.total, 7);
   step(g, "use:i08", die(1));
   assert.deepEqual(g.dice.values, [1, 1]);
-  step(g, "use:i01");
-  assert.deepEqual(g.dice.values, [6, 6]);
+  assert.ok(!ids(g).includes("use:i01"));
+  assert.throws(() => choose(g, "use:i01"));
   step(g, "use:i19");
   choose(g, "target:-2");
   step(g, "check:accept");
-  assert.equal(p.pos, 11);
+  assert.equal(p.pos, 1);
   assert.equal(p.movePenalty, 0);
-  assert.equal(p.items.length, 0);
+  assert.deepEqual(p.items, ["i01"]);
 });
 
 test("terrain, traps, portals, heals and rest upgrades resolve at their proper times", () => {
@@ -582,6 +774,7 @@ test("terrain, traps, portals, heals and rest upgrades resolve at their proper t
   step(h, "roll", die(1));
   assert.equal(q.hp, 5);
   step(h, "passOffer");
+  q.gear = ["l11"];
   q.pos = 32;
   step(h, "roll", die(2));
   assert.equal(q.pos, 15);
@@ -763,6 +956,7 @@ test("returning to Start, legendary sacrifice, board cleanses and redistribution
   assert.equal(q.movePenalty, -2);
   step(g, "use:i15");
   step(g, "target:1");
+  step(g, "target:1:all");
   assert.deepEqual(q.locked, []);
   assert.equal(q.movePenalty, 0);
   p.pos = 99;

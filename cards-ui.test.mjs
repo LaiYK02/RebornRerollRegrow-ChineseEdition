@@ -22,7 +22,7 @@ test("决斗中的两张角色卡高亮，损失与回复的生命反映在红�
   const first = renderGame(makeRoom(), false);
   assert.equal([...first.matchAll(/class="hud-card [^"]*dueling/g)].length, 2);
   const hudHearts = (html) =>
-    [...html.split('<div class="hud">')[1].matchAll(/class="grayheart"/g)]
+    [...html.split('<div class="own-hud">')[1].matchAll(/class="grayheart"/g)]
       .length;
   assert.equal(hudHearts(first), 4);
   state.players[0].hp = 8;
@@ -35,6 +35,74 @@ const roster = ["黎明", "正午", "黄昏", "夜游"].map((name, index) => ({
   color: "#348f98",
   online: true,
 }));
+
+function makeGameRoom(overrides = {}) {
+  return {
+    you: "0",
+    hostId: "0",
+    players: roster,
+    chat: [],
+    game: { ...view(newGame(roster), "0"), ...overrides },
+  };
+}
+
+test("地图或战斗居中，其他骑士分列两侧，自己的面板在手牌前方", () => {
+  const html = renderGame(makeGameRoom(), false);
+  assert.match(
+    html,
+    /seat-left.*data-player="1".*data-player="3".*class="stage".*seat-right.*data-player="2"/,
+  );
+  assert.match(
+    html,
+    /id="adventure-log".*id="room-chat".*class="item-hand.*class="own-hud".*class="exit-dock"/,
+  );
+});
+
+test("手牌显示自己的所有物品，只有合法物品发亮，选项留在手牌上方", () => {
+  const room = makeGameRoom();
+  room.game.players[0].items = ["i09", "i02", "i09"];
+  room.game.actions = [
+    { id: "attack", label: "掷骰攻击" },
+    { id: "use:i09", label: "多掷一枚骰子", card: "i09" },
+  ];
+  const html = renderGame(room, false);
+  assert.match(html, /attack-command.*data-action="attack"/);
+  assert.equal([...html.matchAll(/class="hand-card is-usable/g)].length, 2);
+  assert.equal(
+    [...html.matchAll(/class="hand-card is-unavailable/g)].length,
+    1,
+  );
+  assert.doesNotMatch(html, /data-action="use:i09"/);
+  const selected = renderGame(room, false, false, { card: "i09", index: 2 });
+  assert.match(
+    selected,
+    /data-action="use:i09".*class="item-hand.*data-item-index="2" aria-pressed="true"/,
+  );
+});
+
+test("神圣净化显示服务器列出的状态与确认按钮，放弃战斗在右侧", () => {
+  const state = newGame(roster);
+  startBattle(state, { attackerId: "0", monsterId: "n01" });
+  const room = makeGameRoom({
+    battle: view(state, "0").battle,
+    itemMenu: {
+      card: "i15",
+      stage: "confirm",
+      target: "黄昏",
+      detail: ["中毒", "缴械"],
+    },
+    actions: [
+      { id: "confirmCleanse", label: "确认净化", card: "i15" },
+      { id: "cancelItem", label: "取消" },
+      { id: "surrender", label: "放弃战斗" },
+    ],
+  });
+  room.game.players[0].items = ["i15"];
+  assert.match(
+    renderGame(room, false),
+    /黄昏.*中毒、缴械.*data-action="confirmCleanse".*class="item-hand.*class="exit-dock".*data-action="surrender"/,
+  );
+});
 
 test("决斗的挑战者居左、原驻玩家居右，且高亮随行动者切换", () => {
   const state = newGame(roster);

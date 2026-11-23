@@ -185,11 +185,11 @@ export function menu(profile, resume) {
     "</footer></section>"
   );
 }
-export function chat(room) {
+export function chat(room, showHeading = true) {
   return (
-    '<section class="chat"><h3>' +
-    icon("chat") +
-    '房间聊天</h3><div class="chat-msg" aria-live="polite">' +
+    '<section class="chat">' +
+    (showHeading ? "<h3>" + icon("chat") + "房间聊天</h3>" : "") +
+    '<div class="chat-msg" aria-live="polite">' +
     chatMessages(room.chat) +
     '</div><form id="chat"><input maxlength="240" aria-label="聊天内容" placeholder="说点什么…" autocomplete="off"><button class="soft" aria-label="发送">' +
     icon("send") +
@@ -266,38 +266,49 @@ function slot(id) {
         "</button>"
     : '<span class="slot empty">·</span>';
 }
-function hud(p, me, b) {
+function hud(p, me, b, active) {
+  const gear =
+    '<div class="gearline" aria-label="装备">' +
+    Array.from({ length: Math.max(3, p.gear.length) }, (_, i) =>
+      slot(p.gear[i]),
+    ).join("") +
+    "</div>";
+  const stat = (symbol, value, label) =>
+    '<span title="' +
+    label +
+    '" aria-label="' +
+    label +
+    " " +
+    esc(value) +
+    '">' +
+    icon(symbol) +
+    esc(value) +
+    "</span>";
   return (
     '<section class="hud-card ' +
     (me ? "self " : "") +
     (b?.actors?.includes(p.id) && !b.monster ? "dueling " : "") +
+    (active ? "seat-active " : "") +
     (!p.online ? "offline" : "") +
     '" data-player="' +
     esc(p.id) +
     '" style="--pc:' +
     colorsafe(p.color) +
-    '"><div class="gearline">' +
-    Array.from({ length: Math.max(3, p.gear.length) }, (_, i) =>
-      slot(p.gear[i]),
-    ).join("") +
-    '</div><div class="hud-body">' +
+    '"><div class="hud-body">' +
     knight(p, "avatar") +
-    "<div><b>" +
+    '<div class="hud-identity"><b>' +
     esc(p.name) +
-    "</b> " +
-    (me ? "我" : "") +
-    (p.online ? "" : " · 离线") +
-    "<br>" +
+    "</b>" +
+    (p.online ? "" : '<small class="seat-offline">离线</small>') +
     hearts(p.hp) +
     '</div></div><div class="hud-stats">' +
-    icon("sword") +
-    p.atk +
-    icon("shield") +
-    p.def +
-    icon("step") +
-    p.act +
-    (me ? "" : icon("item") + p.itemCount) +
-    "</div></section>"
+    stat("sword", p.atk, "攻击") +
+    stat("shield", p.def, "防御") +
+    stat("step", p.act, "行动") +
+    (me ? "" : stat("item", p.itemCount, "道具")) +
+    "</div>" +
+    gear +
+    "</section>"
   );
 }
 const hueByColor = [0, 40, 170, 98, 225, -55];
@@ -428,6 +439,14 @@ export function diceLayout(count, width, height) {
   }
   return { columns: best.columns, size: best.size, pageSize };
 }
+
+export const dieCube =
+  '<div class="dice-cell" data-face="1"><div class="dice-cube">' +
+  Array.from(
+    { length: 6 },
+    (_, i) => '<i class="dice-face face-' + (i + 1) + '"></i>',
+  ).join("") +
+  "</div></div>";
 
 function rollLine(r, label) {
   return r
@@ -592,40 +611,210 @@ export function battle(g) {
     "</div></section>"
   );
 }
-export function game(r, solo, combatResolving = false) {
+export function actionItem(action) {
+  return /^use:(i\d{2})(?::|$)/.exec(action.id)?.[1];
+}
+
+function detailsText(detail) {
+  return Array.isArray(detail) ? detail.join("、") : detail;
+}
+
+const commandIcons = {
+  attack: "sword",
+  defend: "shield",
+  skip: "sword",
+  roll: "dice",
+  clash: "duel",
+  heal: "heart",
+  rest: "dice",
+  end: "flag",
+  return: "step",
+  resolve: "map",
+  confirm: "key",
+  confirmAttack: "key",
+  confirmEquipment: "key",
+  "check:accept": "key",
+};
+function renderAction(a) {
+  const glyph = commandIcons[a.id];
+  const style =
+    a.id === "attack"
+      ? " attack-command"
+      : a.id === "defend"
+        ? " defense-command"
+        : "";
+  const details = detailsText(a.detail);
+  return (
+    '<button type="button" class="choice-action' +
+    style +
+    '" data-action="' +
+    esc(a.id) +
+    '">' +
+    (glyph
+      ? '<span class="command-sigil">' + icon(glyph) + "</span>"
+      : a.card
+        ? art(a.card)
+        : "") +
+    '<span class="choice-label">' +
+    esc(a.label) +
+    (details && !a.label.includes(details)
+      ? "<small>" + esc(details) + "</small>"
+      : "") +
+    "</span></button>"
+  );
+}
+
+function handCards(me, items, menu, selected) {
+  return (
+    '<div class="item-hand' +
+    (me.items.length > 8 ? " many-cards" : "") +
+    '" aria-label="道具手牌"' +
+    (me.items.length ? "" : " hidden") +
+    ">" +
+    me.items
+      .map((card, index) => {
+        const usable = menu
+          ? menu.card === card
+          : items.some((option) => actionItem(option) === card);
+        const active = menu
+          ? card === menu.card && me.items.indexOf(card) === index
+          : selected?.index === index;
+        const offset = index - (me.items.length - 1) / 2;
+        return (
+          '<button type="button" class="hand-card ' +
+          (usable ? "is-usable" : "is-unavailable") +
+          '" data-hand-item="' +
+          esc(card) +
+          '" data-item-index="' +
+          index +
+          '" aria-pressed="' +
+          active +
+          '" aria-label="' +
+          esc(cards[card]?.name) +
+          (usable ? "" : " · 当前只可查看") +
+          '" title="' +
+          esc(cards[card]?.name) +
+          '" style="--fan-angle:' +
+          Math.max(-24, Math.min(24, offset * 6)) +
+          "deg;--fan-drop:" +
+          Math.min(19, offset * offset * 1.8) +
+          'px">' +
+          art(card) +
+          "<span>" +
+          esc(cards[card]?.name) +
+          "</span></button>"
+        );
+      })
+      .join("") +
+    "</div>"
+  );
+}
+
+function choiceControls(g, actions, menu, selected, combatResolving) {
+  const card = menu?.card || selected?.card;
+  const details = detailsText(menu?.detail);
+  const heading = menu?.summary || menu?.target;
+  const surrender = g.battle?.phase === "surrenderConfirm";
+  const diceNote =
+    !combatResolving && g.dice?.values?.length && !card && !surrender;
+  if (!actions.length && !diceNote && !card) return "";
+  return (
+    '<div class="actions' +
+    (card || surrender ? " options-open" : "") +
+    '">' +
+    (card
+      ? '<div class="choice-header"><b>' +
+        esc(cards[card]?.name) +
+        "</b>" +
+        (heading ? "<span>" + esc(heading) + "</span>" : "") +
+        (details
+          ? '<small class="choice-summary">' + esc(details) + "</small>"
+          : "") +
+        button(
+          "inspectHand",
+          "道具说明",
+          "book",
+          "dock-small",
+          'data-card="' + esc(card) + '"',
+        ) +
+        "</div>"
+      : surrender
+        ? '<div class="choice-header"><b>放弃战斗将按死亡结算，返回起点。</b></div>'
+        : "") +
+    '<div class="action-row">' +
+    actions.map(renderAction).join("") +
+    (selected
+      ? button("cancelHand", "取消", "close", "choice-action choice-cancel")
+      : "") +
+    "</div>" +
+    (diceNote
+      ? '<small class="dice-read" title="' +
+        esc(g.dice.values.join(" + ")) +
+        '">' +
+        icon("dice") +
+        " " +
+        esc(g.dice.label) +
+        " · " +
+        (g.dice.values.length <= 8
+          ? g.dice.values.join(" + ") + " → "
+          : g.dice.values.length + " 枚 → ") +
+        esc(g.dice.total) +
+        parityLabel(g.dice.parity) +
+        "</small>"
+      : "") +
+    "</div>"
+  );
+}
+
+export function game(r, solo, combatResolving = false, handSelection = null) {
   const g = r.game,
     me = g.players.find((p) => p.id === r.you),
     current = g.players.find((p) => p.id === (g.actor || g.turn)),
     win = g.players.find((p) => p.id === g.winner);
   const actions = combatResolving ? [] : g.actions || [];
+  const surrender = actions.find((a) => a.id === "surrender");
+  const menu = combatResolving ? null : g.itemMenu || g.battle?.itemMenu;
+  const items = actions.filter((a) => actionItem(a));
+  const selected =
+    handSelection &&
+    !menu &&
+    me.items[handSelection.index] === handSelection.card &&
+    items.some((a) => actionItem(a) === handSelection.card)
+      ? handSelection
+      : null;
+  const visibleActions = actions.filter(
+    (a) =>
+      a !== surrender &&
+      (menu || (selected ? actionItem(a) === selected.card : !actionItem(a))),
+  );
+  const opponents = g.players.filter((p) => p.id !== r.you);
+  const side = (right) =>
+    opponents
+      .filter((_, index) => index % 2 === Number(right))
+      .map((p) => hud(p, false, g.battle, p.id === g.actor))
+      .join("");
+  const currentName =
+    current?.name ||
+    (g.actor === monsterFighter && g.battle ? monsterName(g.battle) : "骑士");
+  const prompt = win
+    ? win.name + " 胜利！"
+    : combatResolving
+      ? currentName + " · 战斗结算中…"
+      : g.prompt || currentName + " · 选择行动";
   return (
-    '<section class="game"><div class="game-top"><span>' +
+    '<section class="game"><div class="game-top"><span class="round-indicator">' +
     icon("flag") +
-    "　第 " +
+    " 第 <strong>" +
     esc(g.round ?? 1) +
-    " 轮　<b>" +
-    esc(
-      current?.name ||
-        (g.actor === monsterFighter && g.battle
-          ? monsterName(g.battle)
-          : "骑士"),
-    ) +
-    '</b> 的回合</span><span class="toolbar">' +
-    button("legend", "地图图例", "map", "mini") +
-    button("roomOptions", "房间", "users", "mini") +
-    '</span></div><div class="arena"><aside class="sidebar">' +
-    (solo
-      ? '<div><b>单人试炼</b><p class="muted">进度自动保存在此浏览器。</p></div>'
-      : chat(r)) +
-    '<div class="logbox"><h3>' +
-    icon("log") +
-    "冒险记录</h3>" +
-    (g.log || [])
-      .slice(-28)
-      .reverse()
-      .map((l) => "<p>" + esc(l) + "</p>")
-      .join("") +
-    '</div></aside><div class="middle"><div class="stage">' +
+    "</strong> 轮" +
+    '</span><p class="game-prompt" aria-live="polite">' +
+    esc(prompt) +
+    '</p><div class="game-nav">' +
+    button("roomOptions", "房间", "users", "dock-small") +
+    button("legend", "地图图例", "map", "dock-small") +
+    '</div></div><div class="arena"><aside class="seat-rail seat-left" aria-label="其他骑士">' +
+    side(false) +
+    '</aside><div class="stage">' +
     (win
       ? '<div class="victory">' +
         art("knight") +
@@ -646,56 +835,41 @@ export function game(r, solo, combatResolving = false) {
       : g.battle
         ? battle(g)
         : board(g)) +
-    '</div><div class="actions" ' +
-    (win ? "hidden" : "") +
-    "><p><b>" +
-    esc(combatResolving ? "战斗结算中…" : g.prompt || "选择行动") +
-    '</b></p><div class="action-row">' +
-    actions
-      .map(
-        (a) =>
-          '<button class="mini" data-action="' +
-          esc(a.id) +
-          '">' +
-          (a.card ? art(a.card) : "") +
-          esc(a.label) +
-          "</button>",
-      )
+    '</div><aside class="seat-rail seat-right" aria-label="其他骑士">' +
+    side(true) +
+    '</aside></div><footer class="game-dock">' +
+    '<div class="field-tools"><details id="adventure-log" class="field-panel"><summary>' +
+    icon("log") +
+    '冒险记录</summary><div class="field-panel-body logbox">' +
+    (g.log || [])
+      .slice(-28)
+      .reverse()
+      .map((l) => "<p>" + esc(l) + "</p>")
       .join("") +
-    "</div>" +
-    (!combatResolving && g.dice?.values?.length
-      ? '<small class="dice-read">' +
-        icon("dice") +
-        " " +
-        esc(g.dice.label) +
-        "　" +
-        g.dice.values.join(" + ") +
-        " → " +
-        esc(g.dice.total) +
-        parityLabel(g.dice.parity) +
-        "</small>"
+    "</div></details>" +
+    (solo
+      ? ""
+      : '<details id="room-chat" class="field-panel"><summary>' +
+        icon("chat") +
+        '房间聊天</summary><div class="field-panel-body">' +
+        chat(r, false) +
+        "</div></details>") +
+    '</div><div class="hand-dock">' +
+    (!win
+      ? choiceControls(g, visibleActions, menu, selected, combatResolving)
       : "") +
-    '</div></div><aside class="inventory"><h3>' +
-    icon("item") +
-    '我的道具</h3><div class="bag-grid">' +
-    Array.from({ length: Math.max(5, me.items.length) }, (_, i) =>
-      me.items[i]
-        ? '<button class="slot" data-detail="' +
-          esc(me.items[i]) +
-          '">' +
-          art(me.items[i]) +
-          "<span>" +
-          esc(cards[me.items[i]].name) +
-          "</span></button>"
-        : slot(),
-    ).join("") +
-    '</div></aside></div><div class="hud"><div class="party">' +
-    g.players
-      .filter((p) => p.id !== r.you)
-      .map((p) => hud(p, false, g.battle))
-      .join("") +
-    "</div>" +
-    hud(me, true, g.battle) +
-    "</div></section>"
+    handCards(me, items, menu, selected) +
+    '<div class="own-hud">' +
+    hud(me, true, g.battle, me.id === g.actor) +
+    "</div></div>" +
+    '<div class="exit-dock">' +
+    (g.battle?.monster && !win
+      ? '<button type="button" class="surrender-button"' +
+        (surrender ? ' data-action="surrender"' : " disabled") +
+        ' aria-label="放弃战斗">' +
+        icon("flag") +
+        "放弃</button>"
+      : "") +
+    "</div></footer></section>"
   );
 }

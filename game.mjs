@@ -6,6 +6,7 @@ import {
   playerStats as battlePlayerStats,
   recordDice,
   refreshAttackAllowance,
+  refreshBattleStats,
   restoreBattleRules,
 } from "./battle.mjs";
 
@@ -31,7 +32,7 @@ const capHP = (p, amount) => {
 const itemLimit = (p) => (equipped(p, "l16") ? Infinity : 5);
 const action = (id, label, card) =>
   card ? { id, label, card } : { id, label };
-const rulesVersion = 6;
+const rulesVersion = 7;
 const matchId = () =>
   Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
 
@@ -221,6 +222,15 @@ export function restoreGame(game, rng = Math.random) {
         (b.monster === "e05" ? 5 : 0);
     }
   }
+  if ((game.rulesVersion ?? 0) < 7) {
+    const suspended = game.players.map((p) => p.resume?.pending?.battle);
+    for (const battle of new Set([b, ...suspended])) {
+      if (battle?.form !== "final") continue;
+      battle.base.atk = (battle.base.atk / 3) * 4;
+      battle.base.def = (battle.base.def / 3) * 4;
+      refreshBattleStats({ ...game, battle });
+    }
+  }
   game.rulesVersion = rulesVersion;
   game.matchId ??= matchId();
   advanceIdleTurn(game, rng);
@@ -315,6 +325,7 @@ function nextTurn(game, rng) {
         phase(game, "battle");
         game.battle = saved.battle;
         game.dice = saved.dice;
+        refreshAttackAllowance(game, next.id);
       } else if (tile.monster === saved.monster) resolveSpace(game, next, rng);
       else phase(game, "move");
     }
@@ -352,6 +363,18 @@ function upgrade(p, stat, change = 1) {
 
 function permanentUpgrades(p, stat) {
   return p.alloc[stat] - Number(p.badgeStat === stat);
+}
+
+function redistribute(game, p) {
+  let count = 0;
+  for (const stat of Object.keys(stats)) {
+    count += permanentUpgrades(p, stat);
+    p[stat] -= p.alloc[stat];
+    p.alloc[stat] = 0;
+  }
+  grantUpgrade(game, p, count);
+  if (p.badgeStat) grantUpgrade(game, p, 1, "badge");
+  p.badgeStat = null;
 }
 
 function removeOne(array, value) {
@@ -694,6 +717,7 @@ function startDuel(game, challenger, champion, rng) {
 function applyArrival(game, p, trapped) {
   const tile = tileAt(game, p);
   if (
+    equipped(p, "l10") ||
     !["desert", "volcano"].includes(tile.terrain) ||
     game.turnTerrain.includes(tile.terrain)
   )
@@ -704,7 +728,7 @@ function applyArrival(game, p, trapped) {
       relocate(game, p, p.pos - 1);
       log(game, p.name + " 在沙漠后退至第 " + p.pos + " 格。");
     }
-  } else if (!equipped(p, "l10")) {
+  } else {
     p.hp--;
     log(game, p.name + " 受到 1 点火山伤害。");
     if (p.hp <= 0) {
@@ -727,6 +751,31 @@ const rollNames = {
   skirmish: "交锋",
   rest: "休息升级",
 };
+
+function needsRainCheck(game, p) {
+  return (
+    tileAt(game, p).terrain === "rainforest" &&
+    !equipped(p, "l10") &&
+    !game.turnTerrain.includes("rainforest")
+  );
+}
+
+function checkOutcome(check) {
+  const threshold = { rain: 3, rest: 5 }[check?.kind];
+  if (threshold === undefined) return null;
+  return check.total >= threshold !== Boolean(check.flipped);
+}
+
+function checkDescription(check) {
+  const outcome = checkOutcome(check);
+  if (outcome === null) return String(check.total);
+  return (
+    check.total +
+    " 点 · " +
+    (outcome ? "成功" : "失败") +
+    (check.flipped ? "（已反转）" : "")
+  );
+}
 
 function showRoll(game, p, rolled = false) {
   const c = game.check;
@@ -755,10 +804,13 @@ function finishRoll(game, p, rng) {
   const c = game.check;
   game.check = null;
   game.mods = {};
-  log(game, p.name + " 的" + rollNames[c.kind] + "判定为 " + c.total + "。");
+  log(
+    game,
+    p.name + " 的" + rollNames[c.kind] + "判定为 " + checkDescription(c) + "。",
+  );
   if (c.kind === "rain") {
     game.turnTerrain.push("rainforest");
-    if (c.total < 3) {
+    if (!checkOutcome(c)) {
       log(game, p.name + " 雨林判定失败，无法移动。");
       if (game.phase === "landing") resolveSpace(game, p, rng);
       else phase(game, "end");
@@ -766,7 +818,7 @@ function finishRoll(game, p, rng) {
       if (c.item) useItem(game, p, c.item, rng);
     }
   } else if (c.kind === "rest") {
-    if (c.total >= 5) grantUpgrade(game, p);
+    if (checkOutcome(c)) grantUpgrade(game, p);
     else log(game, p.name + " 休息格升级判定失败。");
     phase(game, "end");
   } else if (c.kind === "skirmish") {
@@ -822,9 +874,8 @@ function removeStatus(game, p, key) {
   syncBadge(game, p);
 }
 
-function statusOptions(p, strong) {
-  const options = p.statuses.flatMap((s, i) => {
-    if (s.type === "stunned" && !strong) return [];
+function statusOptions(p) {
+  const options = p.statuses.map((s, i) => {
     const translated = {
       slipped: "滑倒",
       disarmed: "缴械",
@@ -832,9 +883,10 @@ function statusOptions(p, strong) {
       buff: "增益",
       debuff: "减益",
     };
-    return [{ key: String(i), text: s.label || translated[s.type] || s.type }];
+    return { key: String(i), text: s.label || translated[s.type] || s.type };
   });
-  if (p.movePenalty) options.push({ key: "snare", text: "移动减益" });
+  if (p.movePenalty)
+    options.push({ key: "snare", text: "移动判定 " + p.movePenalty });
   for (const id of p.locked)
     options.push({ key: "gear-" + id, text: "封锁的" + nameOf(id) });
   return options;
@@ -842,13 +894,35 @@ function statusOptions(p, strong) {
 
 function targetOptions(game, p, id) {
   const result = [];
+  const selected =
+    game.phase === "itemTarget" ? game.pending.target : undefined;
   for (const [index, q] of game.players.entries()) {
     if (id === "i17")
       result.push(action("target:" + index, q.name + " · 移动判定 −2", id));
     if (id === "i14" || id === "i15") {
-      const available = statusOptions(q, id === "i15");
-      if (id === "i15" && available.length)
-        result.push(action("target:" + index, q.name + " · 驱散全部", id));
+      const available = statusOptions(q);
+      if (
+        id === "i14" &&
+        q === p &&
+        (game.phase === "banana" || game.pending.back?.value === "banana")
+      )
+        available.push({ key: "banana", text: "香蕉皮 · 继续移动" });
+      if (
+        id === "i15" &&
+        available.length &&
+        (selected === undefined || selected === index)
+      ) {
+        const confirming = selected !== undefined;
+        result.push(
+          action(
+            "target:" + index + (confirming ? ":all" : ""),
+            confirming
+              ? "确认驱散" + q.name + "的全部状态"
+              : "查看" + q.name + "的状态",
+            id,
+          ),
+        );
+      }
       if (id === "i14")
         for (const st of available) {
           result.push(
@@ -874,6 +948,33 @@ function menu(game, value, extra = {}) {
   const back = { value: game.phase, pending: game.pending, actor: game.actor };
   phase(game, value, { ...extra, back }, game.actor);
 }
+
+const targetedItems = ["i14", "i15", "i17", "i18", "i19"];
+
+function itemAction(card, label) {
+  const result = action("use:" + card, label, card);
+  if (targetedItems.includes(card)) result.opensItemMenu = true;
+  return result;
+}
+
+function boardItemMenu(game) {
+  const { id, target } = game.pending;
+  if (id === "i15" && target !== undefined) {
+    const q = game.players[target];
+    return {
+      card: id,
+      stage: "confirm",
+      target: q.name,
+      summary: "确认后驱散" + q.name + "的全部增益与减益",
+      detail: statusOptions(q).map((option) => option.text),
+    };
+  }
+  return {
+    card: id,
+    stage: id === "i14" ? "status" : "target",
+    summary: id === "i14" ? "选择要驱散的一项状态" : "选择目标或点数",
+  };
+}
 function goBack(game) {
   const { value, pending, actor } = game.pending.back;
   phase(game, value, pending, actor);
@@ -885,27 +986,18 @@ function consume(game, p, id) {
 }
 
 function useItem(game, p, id, rng) {
-  if (game.phase === "banana" && id === "i14") {
-    resolveBanana(game, p, rng, true);
-    return;
-  }
-  if (["i14", "i15", "i17", "i18", "i19"].includes(id)) {
+  if (targetedItems.includes(id)) {
     menu(game, "itemTarget", { id });
     return;
   }
-  if (
-    (id === "i05" || id === "i11") &&
-    tileAt(game, p).terrain === "rainforest" &&
-    !game.turnTerrain.includes("rainforest")
-  ) {
+  if ((id === "i05" || id === "i11") && needsRainCheck(game, p)) {
     rollCheck(game, p, "rain", rng, id);
     return;
   }
   consume(game, p, id);
   switch (id) {
     case "i01":
-      game.check.values = game.check.values.map((n) => 7 - n);
-      showRoll(game, p);
+      game.check.flipped = !game.check.flipped;
       break;
     case "i02":
       capHP(p, 2);
@@ -914,20 +1006,7 @@ function useItem(game, p, id, rng) {
       moveForward(game, p, p.pos + 1, rng, false);
       break;
     case "i06":
-      grantUpgrade(
-        game,
-        p,
-        Object.keys(stats).reduce(
-          (count, stat) => count + permanentUpgrades(p, stat),
-          0,
-        ),
-      );
-      if (p.badgeStat) grantUpgrade(game, p, 1, "badge");
-      for (const stat of Object.keys(stats)) {
-        p[stat] -= p.alloc[stat];
-        p.alloc[stat] = 0;
-      }
-      p.badgeStat = null;
+      redistribute(game, p);
       break;
     case "i08": {
       const c = game.check;
@@ -961,10 +1040,18 @@ function resolveBanana(game, p, rng, cleansed) {
   resolveArrival(game, p, rng, { ...arrival, trapped: !cleansed });
 }
 
-function applyTarget(game, p, parts) {
+function applyTarget(game, p, parts, rng) {
   const id = game.pending.id;
   const [, target, opt] = parts;
+  if (id === "i15" && opt === undefined) {
+    game.pending.target = Number(target);
+    return;
+  }
   goBack(game);
+  if (id === "i14" && opt === "banana") {
+    resolveBanana(game, p, rng, true);
+    return;
+  }
   consume(game, p, id);
   if (id === "i18") game.mods.face = Number(target);
   else if (id === "i19") {
@@ -987,7 +1074,12 @@ function applyTarget(game, p, parts) {
 
 function boardItems(game, p) {
   if (game.check)
-    return unique(p.items).filter((id) => ["i01", "i08", "i19"].includes(id));
+    return unique(p.items).filter(
+      (id) =>
+        id === "i08" ||
+        id === "i19" ||
+        (id === "i01" && checkOutcome(game.check) !== null),
+    );
   const preRoll = ["move", "skirmish", "rest"].includes(game.phase);
   const roaming = ["move", "end", "landing", "finish", "rest"].includes(
     game.phase,
@@ -1028,7 +1120,7 @@ function actions(game, id) {
   if (game.phase === "battle") return battleActions(game, id);
   if (game.phase === "banana")
     return [
-      action("use:i14:banana", "净化香蕉皮 · 继续移动", "i14"),
+      ...(carried(p, "i14") ? [itemAction("i14", "使用净化")] : []),
       action("stopBanana", "停在当前格"),
     ];
   let options;
@@ -1038,13 +1130,13 @@ function actions(game, id) {
       action("cancel", "取消"),
     ];
   if (game.check)
-    options = [action("check:accept", "确认判定 · " + game.check.total)];
+    options = [
+      action("check:accept", "确认判定 · " + checkDescription(game.check)),
+    ];
   else
     switch (game.phase) {
       case "move": {
-        const rain =
-          tileAt(game, p).terrain === "rainforest" &&
-          !game.turnTerrain.includes("rainforest");
+        const rain = needsRainCheck(game, p);
         options = [action("roll", rain ? "投掷雨林判定" : "投骰移动")];
         break;
       }
@@ -1108,7 +1200,12 @@ function actions(game, id) {
   return [
     ...options,
     ...boardItems(game, p).map((c) =>
-      action("use:" + c, "使用" + nameOf(c), c),
+      itemAction(
+        c,
+        c === "i01"
+          ? "命数棱镜 · 反转为" + (checkOutcome(game.check) ? "失败" : "成功")
+          : "使用" + nameOf(c),
+      ),
     ),
   ];
 }
@@ -1148,6 +1245,12 @@ function performAction(game, playerId, actionId, rng) {
   }
   if (game.phase === "battle") {
     const outcome = actBattle(game, playerId, actionId, rng);
+    if (game.battle.redistribute) {
+      const owner = player(game, game.battle.redistribute);
+      delete game.battle.redistribute;
+      redistribute(game, owner);
+      refreshAttackAllowance(game, owner.id);
+    }
     game.players.forEach((p) => syncBadge(game, p));
     settleBattle(game, outcome, rng);
     if (game.log.length > 120) game.log.splice(0, game.log.length - 120);
@@ -1157,15 +1260,7 @@ function performAction(game, playerId, actionId, rng) {
     [verb, choice] = parts;
   switch (verb) {
     case "roll":
-      rollCheck(
-        game,
-        p,
-        tileAt(game, p).terrain === "rainforest" &&
-          !game.turnTerrain.includes("rainforest")
-          ? "rain"
-          : "move",
-        rng,
-      );
+      rollCheck(game, p, needsRainCheck(game, p) ? "rain" : "move", rng);
       break;
     case "check":
       finishRoll(game, p, rng);
@@ -1231,7 +1326,7 @@ function performAction(game, playerId, actionId, rng) {
       useItem(game, p, choice, rng);
       break;
     case "target":
-      applyTarget(game, p, parts);
+      applyTarget(game, p, parts, rng);
       break;
   }
 }
@@ -1333,7 +1428,14 @@ function describe(game, viewer) {
         ? " · 选择" + nameOf(game.pending.id) + "的目标或点数"
         : " · 正在选择行动目标")
     );
-  if (game.check) return who + " · 采用本次判定，或使用道具调整点数";
+  if (game.check)
+    return (
+      who +
+      " · " +
+      rollNames[game.check.kind] +
+      "判定 " +
+      checkDescription(game.check)
+    );
   const labels = {
     move: "准备移动",
     end: "本回合的格子已结算",
@@ -1353,6 +1455,14 @@ function describe(game, viewer) {
 export function view(game, id) {
   const b = game.battle;
   let battle = null;
+  const choosing =
+    !game.winner && !pendingUpgrade(game) && actorId(game) === id;
+  const itemMenu =
+    choosing && game.phase === "itemTarget"
+      ? boardItemMenu(game)
+      : choosing && b?.itemMenu
+        ? b.itemMenu
+        : null;
   if (b) {
     const fields = [
       "monster",
@@ -1388,6 +1498,7 @@ export function view(game, id) {
     battle.combatants = Object.fromEntries(
       b.actors.map((id) => [id, battlePlayerStats(game, id)]),
     );
+    if (itemMenu && b.itemMenu) battle.itemMenu = itemMenu;
   }
   return structuredClone({
     players: game.players.map((p) => ({
@@ -1423,6 +1534,7 @@ export function view(game, id) {
     phase: pendingUpgrade(game) && !game.winner ? "upgrade" : game.phase,
     round: game.round,
     battle,
+    itemMenu,
     actions: actions(game, id),
     winner: game.winner,
     log: game.log.slice(-120),

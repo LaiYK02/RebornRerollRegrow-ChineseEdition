@@ -28,6 +28,7 @@ const statusNames = {
   knight: "骑士精神",
   oil: "淬刃油",
   extra: "借运骰",
+  golden: "黄金骰",
   rage: "暴怒蓄力",
   growth: "逐轮增强",
   erosion: "防御衰减",
@@ -206,7 +207,7 @@ function displayedStatuses(s) {
   );
 }
 
-function sync(s) {
+export function refreshBattleStats(s) {
   const b = s.battle;
   if (b.monster) Object.assign(b, monsterDisplay(s));
   b.effects = b.active.map((key) => effectText(s, key));
@@ -311,19 +312,15 @@ export function startBattle(
     const p = playerStats(s, attackerId);
     b.base =
       form === "final"
-        ? { atk: 3 * p.def, def: 3 * p.atk }
+        ? { atk: 4 * p.def, def: 4 * p.atk }
         : { atk: card.atk, def: card.def };
     b.active = monsterEffects(form, rng);
     b.maxHp = form === "final" ? 15 : card.hp + (effect(s, "e05.1") ? 5 : 0);
     b.hp = Math.min(b.maxHp, monsterState?.hp ?? monsterHp ?? b.maxHp);
+    // Binding is checked before the monster applies its opening gear seal.
+    if (b.active.length && gearCount(s, attackerId, "l01")) b.phase = "binding";
     if (effect(s, "b02.1")) status(s, b.first).envy = 2;
     if (effect(s, "b02.3")) status(s, b.first).gearSeal = true;
-    if (
-      b.active.length &&
-      player(s, attackerId).gear.includes("l01") &&
-      !player(s, attackerId).locked?.includes("l01")
-    )
-      b.phase = "binding";
   }
   log(
     s,
@@ -345,7 +342,7 @@ export function restoreBattleRules(s, biome) {
     if (b.hp > 0) b.hp += maxHp - b.maxHp;
     b.maxHp = maxHp;
   }
-  sync(s);
+  refreshBattleStats(s);
   for (const roll of [b.attackRoll, b.defenseRoll, b.equipmentRoll]) {
     if (!roll || roll.cannot) continue;
     if (roll.id === MONSTER) {
@@ -624,14 +621,13 @@ function checkStrikes(s) {
   let hit = margin > 0;
   if (a.failed) hit = false;
   if (gearCount(s, b.side, "l03")) hit = true;
-  if (b.flip) hit = !hit;
   if (
     b.side !== MONSTER &&
     effect(s, "b05.1") &&
     parityOf(margin, a.parity) === "even"
   )
     hit = false;
-  return { hit, margin, shield };
+  return { hit: b.flip ? !hit : hit, margin, shield };
 }
 
 function resolveStrike(s) {
@@ -663,7 +659,7 @@ function resolveStrike(s) {
       gearCount(s, actor, "c17") +
       gearCount(s, actor, "l02") +
       gearCount(s, target, "c17");
-    if (!b.monster) amount += gearCount(s, actor, "l09");
+    if (!b.monster) amount += 2 * gearCount(s, actor, "l09");
     if (actor === MONSTER && effect(s, "b01.1")) amount++;
     if (actor === MONSTER && effect(s, "b07.3") && dv.disarm) amount++;
     if (actor === MONSTER && effect(s, "e01.1") && b.hp === 1) amount *= 2;
@@ -790,7 +786,7 @@ function drive(s, rng) {
       defenseRoll(s, rng);
     else break;
   }
-  sync(s);
+  refreshBattleStats(s);
 }
 
 const action = (id, label, card) =>
@@ -804,13 +800,15 @@ const itemChoice = (card, suffix = "", parameter = "") =>
 
 function statusKeys(s, id, strong) {
   const p = player(s, id);
-  const keys = Object.keys(status(s, id)).filter(
-    (k) => k in statusNames && status(s, id)[k] && (strong || k !== "stun"),
+  const f = s.battle.fighters[id];
+  const keys = Object.keys(f.status).filter(
+    (k) => k in statusNames && f.status[k] && (strong || k !== "stun"),
   );
+  if (strong && f.golden) keys.push("golden");
   if (p?.movePenalty) keys.push("snare");
   if (p?.statuses?.some((entry) => entry.type === "slipped"))
     keys.push("slipped");
-  const curseLocks = s.battle.fighters[id].curseLocks || [];
+  const curseLocks = f.curseLocks || [];
   for (const card of new Set([...(p?.locked || []), ...curseLocks]))
     keys.push(`lock-${card}`);
   return keys;
@@ -825,6 +823,7 @@ function statusName(key) {
 function cleanse(s, id, key) {
   const p = player(s, id);
   if (key === "gearSeal") removeEffect(s, "b02.3");
+  else if (key === "golden") delete s.battle.fighters[id].golden;
   else if (key === "snare") p.movePenalty = 0;
   else if (key === "slipped")
     p.statuses = p.statuses.filter((entry) => entry.type !== "slipped");
@@ -838,13 +837,40 @@ function cleanse(s, id, key) {
   } else delete status(s, id)[key];
 }
 
-function cleanseOptions(s, id, target, strong) {
-  const keys = statusKeys(s, target, strong);
-  return target === id
-    ? keys
-    : keys.filter((key) =>
-        ["growth", "rage", "oil", "extra", "atk", "def", "act"].includes(key),
+function cleanseOptions(s, target) {
+  return statusKeys(s, target, true).filter((key) => key !== "erosion");
+}
+
+function cleanseTarget(s, id, side) {
+  const target = side === "self" ? id : rival(s.battle, id);
+  const label = side === "self" ? "自己" : name(s, target);
+  const keys = cleanseOptions(s, target);
+  const detail = keys.map((key) => battleText(s, statusName(key)));
+  return { side, target: label, keys, detail };
+}
+
+function itemMenuChoices(s, id) {
+  const { card, stage, target } = s.battle.itemMenu;
+  const cancel = action("cancelItem", "取消");
+  if (stage === "confirm")
+    return [
+      action("confirmCleanse", `确认净化${target}`, card),
+      action("backItem", "重新选择目标"),
+      cancel,
+    ];
+  const choices = [];
+  for (const side of ["self", "other"]) {
+    const { target, keys, detail } = cleanseTarget(s, id, side);
+    if (!keys.length) continue;
+    if (card === "i15") choices.push(itemChoice(card, `选择${target}`, side));
+    else
+      keys.forEach((key, index) =>
+        choices.push(
+          itemChoice(card, `${target} · ${detail[index]}`, `${side}:${key}`),
+        ),
       );
+  }
+  return [...choices, cancel];
 }
 
 function updateRemaining(s) {
@@ -867,19 +893,20 @@ function reactionChoices(s, id) {
     : b.side === id
       ? b.attackRoll
       : b.defenseRoll;
-  if (!roll || roll.cannot) return choices;
-  if (!equipment && b.side !== id && b.shock) return choices;
-  const pvpAttack = !b.monster && b.side === id;
-  if (pvpAttack && b.phase === "reaction")
-    return items.includes("i01") ? [itemChoice("i01", "反转命中结果")] : [];
+  if (!roll) return choices;
   if (
-    !effect(s, "b07.1") &&
     items.includes("i01") &&
-    b.phase !== "attackReview"
+    (equipment ||
+      (b.phase === "reaction" &&
+        b.attackRoll &&
+        b.defenseRoll &&
+        !effect(s, "b07.1")))
   )
     choices.push(
       itemChoice("i01", equipment ? "反转装备判定" : "反转命中结果"),
     );
+  if (roll.cannot || (!equipment && b.side !== id && b.shock)) return choices;
+  if (!b.monster && b.side === id && b.phase === "reaction") return choices;
   if (items.includes("i08")) choices.push(itemChoice("i08", "重掷我的判定"));
   if (!effect(s, "b07.1") && items.includes("i19"))
     choices.push(
@@ -916,6 +943,10 @@ function itemChoices(s, id) {
       case "i04":
         if (b.monster && !effect(s, "b01.3"))
           choices.push(itemChoice(card, "逃离战斗"));
+        break;
+      case "i06":
+        if (Object.values(p.alloc || {}).some((amount) => amount > 0))
+          choices.push(itemChoice(card, "重新分配属性点"));
         break;
       case "i07":
         for (const [key, label] of Object.entries(statNames))
@@ -954,22 +985,11 @@ function itemChoices(s, id) {
         break;
       case "i14":
       case "i15":
-        for (const target of [id, other]) {
-          const who = target === id ? "自己" : name(s, target);
-          const side = target === id ? "self" : "other";
-          const keys = cleanseOptions(s, id, target, card === "i15");
-          if (card === "i15" && keys.length)
-            choices.push(itemChoice(card, `净化${who}的全部状态`, side));
-          if (card === "i14")
-            for (const key of keys)
-              choices.push(
-                itemChoice(
-                  card,
-                  `解除${who}的${battleText(s, statusName(key))}`,
-                  `${side}:${key}`,
-                ),
-              );
-        }
+        if (cleanseOptions(s, id).length || cleanseOptions(s, other).length)
+          choices.push({
+            ...itemChoice(card, "选择要净化的状态"),
+            opensItemMenu: true,
+          });
         break;
       case "i16":
         if (!b.monster) choices.push(itemChoice(card, "双方展开骑士对决"));
@@ -987,6 +1007,7 @@ function itemChoices(s, id) {
 export function battleActions(s, id) {
   const b = s.battle;
   if (!b || b.phase === "done" || b.actorId !== id) return [];
+  if (b.itemMenu) return itemMenuChoices(s, id);
   if (b.phase === "surrenderConfirm")
     return [
       action("confirmSurrender", "确认放弃并重生"),
@@ -1004,6 +1025,7 @@ function battlePhaseActions(s, id) {
     return [
       action("repeatOpening", "再次行动", "c09"),
       action("passOpening", "转入防御"),
+      ...itemChoices(s, id).filter((a) => a.card === "i06"),
     ];
   if (b.phase === "binding")
     return b.active.map((key) =>
@@ -1025,7 +1047,10 @@ function battlePhaseActions(s, id) {
   }
   if (b.phase === "equipmentCheck")
     return [
-      action("confirmEquipment", "确认装备判定"),
+      action(
+        "confirmEquipment",
+        `确认装备判定 · 当前${equipmentSuccess(b) ? "成功" : "失败"}`,
+      ),
       ...reactionChoices(s, id),
     ];
   if (b.phase === "attackReview")
@@ -1044,6 +1069,7 @@ function battlePhaseActions(s, id) {
       status(s, id).stun ? "晕眩 · 承受攻击" : "掷骰防御",
     );
   else if (cantAttack(s, id)) main = action("skip", "无法攻击 · 跳过本轮");
+  else if (!b.remaining) main = action("skip", "行动用尽 · 结束本轮");
   else main = action("attack", `掷骰攻击 · 剩余 ${b.remaining} 次`);
   return [main, ...itemChoices(s, id)];
 }
@@ -1083,6 +1109,9 @@ function useItem(s, id, card, arg, more, rng) {
         monsterState: { hp: b.hp, form: b.form, slimes: b.slimes },
       });
       break;
+    case "i06":
+      b.redistribute = id;
+      break;
     case "i07":
       v[arg] = (v[arg] || 0) + 1;
       break;
@@ -1111,8 +1140,7 @@ function useItem(s, id, card, arg, more, rng) {
       break;
     case "i15": {
       const target = arg === "self" ? id : other;
-      for (const k of cleanseOptions(s, id, target, true))
-        cleanse(s, target, k);
+      for (const k of cleanseOptions(s, target)) cleanse(s, target, k);
       break;
     }
     case "i16":
@@ -1145,13 +1173,18 @@ function useItem(s, id, card, arg, more, rng) {
   }
 }
 
+function equipmentSuccess(b) {
+  const roll = b.equipmentRoll;
+  const success = !roll.failed && roll.total >= 4;
+  return b.equipmentFlip ? !success : success;
+}
+
 function finishEquipment(s, apply) {
   const b = s.battle;
   const { id, card } = b.optional.shift();
   if (apply) {
     const roll = b.equipmentRoll;
-    let success = !roll.failed && roll.total >= 4;
-    if (b.equipmentFlip) success = !success;
+    const success = equipmentSuccess(b);
     if (success) changeHP(s, id, 1);
     else if (card === "c12") {
       const frame = hp(s, id) === 1 ? combatFrame(s) : null;
@@ -1188,8 +1221,24 @@ export function actBattle(s, id, actionId, rng = Math.random) {
     b.spent = 0;
     b.remaining = stats(s, id).act;
     b.phase = "attack";
+  } else if (verb === "cancelItem") {
+    delete b.itemMenu;
+  } else if (verb === "backItem") {
+    b.itemMenu = { card: b.itemMenu.card, stage: "target" };
+  } else if (verb === "confirmCleanse") {
+    const { card, side } = b.itemMenu;
+    delete b.itemMenu;
+    useItem(s, id, card, side, undefined, rng);
   } else if (verb === "use") {
-    useItem(s, id, card, arg, more, rng);
+    if (!arg && (card === "i14" || card === "i15"))
+      b.itemMenu = { card, stage: card === "i14" ? "status" : "target" };
+    else if (card === "i15") {
+      const { side, target, detail } = cleanseTarget(s, id, arg);
+      b.itemMenu = { card, stage: "confirm", side, target, detail };
+    } else {
+      if (card === "i14") delete b.itemMenu;
+      useItem(s, id, card, arg, more, rng);
+    }
   } else if (verb === "bind") {
     removeEffect(s, card);
     beginTurn(s);
@@ -1198,6 +1247,7 @@ export function actBattle(s, id, actionId, rng = Math.random) {
     b.phase = "defend";
     b.actorId = rival(b, id);
   } else if (verb === "defend") defenseRoll(s, rng);
+  else if (verb === "skip" && !b.remaining) afterStrike(s);
   else if (verb === "skip" || verb === "passOpening") endTurn(s);
   else if (verb === "shock") {
     b.shock = true;
