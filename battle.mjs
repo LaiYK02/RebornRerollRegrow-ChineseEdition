@@ -74,9 +74,17 @@ function applyDamage(s, id, amount) {
   return lost;
 }
 
-function effectText(key) {
+function battleText(s, text) {
+  return s.battle.monster === "final"
+    ? text.replace(/傲慢|嫉妒|暴怒|怠惰|贪婪|暴食|色欲/g, "原初之王")
+    : text;
+}
+
+function effectText(s, key) {
+  if (s.battle.monster === "final" && key === "b06.2")
+    return "第 10 轮结束或被击败时引爆自身，造成 8 点实际伤害。挑战者须在爆炸后存活才获胜。";
   const [id, number] = key.split(".");
-  return cards[id].effects[Number(number) - 1];
+  return battleText(s, cards[id].effects[Number(number) - 1]);
 }
 
 function monsterEffects(id, rng) {
@@ -101,7 +109,7 @@ function removeEffect(s, key) {
   if (key === "b03.1") delete status(s, MONSTER).growth;
   if (key === "b03.2") delete status(s, MONSTER).rage;
   if (key === "b06.1") delete status(s, MONSTER).erosion;
-  log(s, `封印了${name(s, MONSTER)}的效果「${effectText(key)}」。`);
+  log(s, `封印了${name(s, MONSTER)}的效果「${effectText(s, key)}」。`);
 }
 
 function playerStats(s, id) {
@@ -167,7 +175,7 @@ function sync(s) {
       shieldMax: effect(s, "b05.3") ? 20 : 0,
     });
   }
-  b.effects = b.active.map(effectText);
+  b.effects = b.active.map((key) => effectText(s, key));
   b.detail =
     b.phase === "done"
       ? "战斗已结束"
@@ -179,11 +187,13 @@ function sync(s) {
           reaction: "确认本次判定，或使用道具调整",
           optional: "选择是否发动装备效果",
           equipmentCheck: "查看并确认装备判定",
+          openingFollowup: "先声双刃 · 再行动一次，或转入防御",
+          surrenderConfirm: "确认放弃将按死亡结算，返回起点",
         }[b.phase] || "战斗结算中";
   b.statuses = Object.fromEntries(
     Object.keys(b.fighters).map((id) => [
       id,
-      statusKeys(s, id, true).map(statusName),
+      statusKeys(s, id, true).map((key) => battleText(s, statusName(key))),
     ]),
   );
 }
@@ -315,10 +325,7 @@ function beginTurn(s) {
     if (effect(s, "b03.1")) v.growth = (v.growth || 0) + 1;
     if (effect(s, "b06.1")) v.erosion = (v.erosion || 0) + 2;
   }
-  b.remaining = Math.max(
-    stats(s, id).act,
-    f.turns === 1 && gearCount(s, id, "c09") ? 2 : 1,
-  );
+  b.remaining = stats(s, id).act;
   b.spent = 0;
   b.phase = "attack";
   b.actorId = id;
@@ -330,6 +337,14 @@ function setOutcome(s, result) {
   s.battle.actorId = null;
 }
 
+function explode(s) {
+  const b = s.battle;
+  b.exploded = true;
+  applyDamage(s, b.first, 8 + gearCount(s, b.first, "c17"));
+  if (b.monster !== "final" || hp(s, b.first) > 0) b.hp = 0;
+  else if (b.hp <= 0) b.hp = b.maxHp;
+}
+
 function checkEnd(s) {
   const b = s.battle;
   if (!b.monster) {
@@ -338,10 +353,20 @@ function checkEnd(s) {
       setOutcome(s, { type: "pvpWin", winnerId: rival(b, loserId), loserId });
     return !!b.outcome;
   }
+  if (
+    b.monster === "final" &&
+    b.hp <= 0 &&
+    hp(s, b.first) > 0 &&
+    effect(s, "b06.2") &&
+    !b.exploded
+  ) {
+    log(s, "原初之王在落败时引爆自身！");
+    explode(s);
+  }
   if (b.hp <= 0 && effect(s, "b03.3") && !b.deathBurst) {
     b.deathBurst = true;
     applyDamage(s, b.first, 3 + gearCount(s, b.first, "c17"));
-    log(s, `${name(s, MONSTER)}死亡时引发了暴怒反击。`);
+    log(s, `${name(s, MONSTER)}死亡时触发了反击。`);
   }
   const common = { monsterId: b.monster, playerId: b.first };
   if (hp(s, b.first) <= 0)
@@ -385,10 +410,9 @@ function endTurn(s) {
   const next = b.fighters[b.side];
   if (next.status.disarm <= next.turns) delete next.status.disarm;
   if (b.side === b.first) {
-    if (effect(s, "b06.2") && b.round >= 5) {
-      log(s, `${name(s, MONSTER)}在第 5 轮结束时自爆！`);
-      b.hp = 0;
-      applyDamage(s, b.first, 8 + gearCount(s, b.first, "c17"));
+    if (effect(s, "b06.2") && b.round >= 10) {
+      log(s, `${name(s, MONSTER)}在第 10 轮结束时自爆！`);
+      explode(s);
       if (checkEnd(s)) return;
     }
     b.round++;
@@ -543,8 +567,7 @@ function resolveStrike(s) {
     d = b.defenseRoll;
   const { hit, margin, shield } = checkStrikes(s);
   b.shield -= shield;
-  if (shield)
-    log(s, `贪婪之盾抵挡 ${shield} 点攻击判定，剩余耐久 ${b.shield}。`);
+  if (shield) log(s, `护盾抵挡 ${shield} 点攻击判定，剩余耐久 ${b.shield}。`);
   const av = status(s, actor),
     dv = status(s, target);
   if (b.shock && !dv.stun) dv.stun = b.fighters[target].turns + 1;
@@ -618,7 +641,7 @@ function resolveStrike(s) {
   b.remaining--;
   if (actor === MONSTER && hit && effect(s, "b01.2")) {
     b.remaining++;
-    log(s, "傲慢获得一次追击。");
+    log(s, `${name(s, MONSTER)}获得一次追击。`);
   }
   const ended = checkEnd(s);
   b.optional = [];
@@ -662,10 +685,19 @@ function afterStrike(s) {
     b.fighters[MONSTER].turns = 0;
     b.attackRoll = b.defenseRoll = null;
   }
-  if (b.remaining <= 0) endTurn(s);
-  else {
+  if (b.remaining > 0) {
     b.phase = "attack";
     b.actorId = b.side;
+  } else if (
+    b.fighters[b.side].turns === 1 &&
+    !b.fighters[b.side].openingUsed &&
+    gearCount(s, b.side, "c09") &&
+    !cantAttack(s, b.side)
+  ) {
+    b.phase = "openingFollowup";
+    b.actorId = b.side;
+  } else {
+    endTurn(s);
   }
 }
 
@@ -734,9 +766,11 @@ function cleanseOptions(s, id, target, strong) {
 function updateRemaining(s) {
   const b = s.battle;
   if (b.side === MONSTER) return;
-  const opening = b.fighters[b.side].turns === 1 && gearCount(s, b.side, "c09");
-  const allowance = Math.max(stats(s, b.side).act, opening ? 2 : 1);
-  b.remaining = Math.max(0, allowance - b.spent);
+  b.remaining = Math.max(0, stats(s, b.side).act - b.spent);
+}
+
+export function refreshAttackAllowance(s, id) {
+  if (s.battle?.phase === "attack" && s.battle.side === id) updateRemaining(s);
 }
 
 function reactionChoices(s, id) {
@@ -810,7 +844,7 @@ function itemChoices(s, id) {
       case "i12":
         if (other === MONSTER)
           for (const key of b.active)
-            choices.push(itemChoice(card, effectText(key), key));
+            choices.push(itemChoice(card, effectText(s, key), key));
         else {
           for (const key of statusKeys(s, other, false))
             choices.push(
@@ -843,7 +877,7 @@ function itemChoices(s, id) {
               choices.push(
                 itemChoice(
                   card,
-                  `解除${who}的${statusName(key)}`,
+                  `解除${who}的${battleText(s, statusName(key))}`,
                   `${side}:${key}`,
                 ),
               );
@@ -865,9 +899,27 @@ function itemChoices(s, id) {
 export function battleActions(s, id) {
   const b = s.battle;
   if (!b || b.phase === "done" || b.actorId !== id) return [];
+  if (b.phase === "surrenderConfirm")
+    return [
+      action("confirmSurrender", "确认放弃并重生"),
+      action("cancelSurrender", "继续战斗"),
+    ];
+  const choices = battlePhaseActions(s, id);
+  if (b.monster && !b.pendingOutcome)
+    choices.push(action("surrender", "放弃战斗"));
+  return choices;
+}
+
+function battlePhaseActions(s, id) {
+  const b = s.battle;
+  if (b.phase === "openingFollowup")
+    return [
+      action("repeatOpening", "再次行动", "c09"),
+      action("passOpening", "转入防御"),
+    ];
   if (b.phase === "binding")
     return b.active.map((key) =>
-      action(`bind:${key}`, `封印 · ${effectText(key)}`, "l01"),
+      action(`bind:${key}`, `封印 · ${effectText(s, key)}`, "l01"),
     );
   if (b.phase === "optional") {
     const diceItems = itemChoices(s, id).filter(
@@ -905,17 +957,7 @@ export function battleActions(s, id) {
     );
   else if (cantAttack(s, id)) main = action("skip", "无法攻击 · 跳过本轮");
   else main = action("attack", `掷骰攻击 · 剩余 ${b.remaining} 次`);
-  const result = [main, ...itemChoices(s, id)];
-  if (
-    b.phase === "attack" &&
-    b.spent &&
-    b.fighters[id].turns === 1 &&
-    gearCount(s, id, "c09") &&
-    b.spent >= stats(s, id).act
-  ) {
-    result.push(action("passOpening", "放弃先声双刃的额外攻击", "c09"));
-  }
-  return result;
+  return [main, ...itemChoices(s, id)];
 }
 
 function useItem(s, id, card, arg, more, rng) {
@@ -1011,7 +1053,7 @@ function useItem(s, id, card, arg, more, rng) {
   }
   if (["i07", "i12", "i13", "i14", "i15", "i16"].includes(card)) {
     updateRemaining(s);
-    if (b.phase === "attack" && !b.remaining) endTurn(s);
+    if (b.phase === "attack" && !b.remaining) afterStrike(s);
   }
 }
 
@@ -1037,7 +1079,22 @@ export function actBattle(s, id, actionId, rng = Math.random) {
   if (!battleActions(s, id).some((a) => a.id === actionId))
     throw new Error("当前无法执行此战斗行动。");
   const [verb, card, arg, more] = actionId.split(":");
-  if (verb === "use") {
+  if (verb === "surrender") {
+    b.surrenderFrom = b.phase;
+    b.phase = "surrenderConfirm";
+  } else if (verb === "cancelSurrender") {
+    b.phase = b.surrenderFrom;
+    delete b.surrenderFrom;
+  } else if (verb === "confirmSurrender") {
+    player(s, id).hp = 0;
+    log(s, `${name(s, id)}放弃战斗，按死亡结算。`);
+    checkEnd(s);
+  } else if (verb === "repeatOpening") {
+    b.fighters[id].openingUsed = true;
+    b.spent = 0;
+    b.remaining = stats(s, id).act;
+    b.phase = "attack";
+  } else if (verb === "use") {
     useItem(s, id, card, arg, more, rng);
   } else if (verb === "bind") {
     removeEffect(s, card);

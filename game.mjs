@@ -4,7 +4,7 @@ import {
   battleActions,
   actBattle,
   recordDice,
-  parityOf,
+  refreshAttackAllowance,
   restoreBattleRules,
 } from "./battle.mjs";
 
@@ -30,7 +30,7 @@ const capHP = (p, amount) => {
 const itemLimit = (p) => (equipped(p, "l16") ? Infinity : 5);
 const action = (id, label, card) =>
   card ? { id, label, card } : { id, label };
-const rulesVersion = 3;
+const rulesVersion = 4;
 
 function log(game, message) {
   game.log.push(message);
@@ -47,16 +47,14 @@ function board() {
   const spaces = {
     start: [1],
     finish: [100],
-    normal: [
-      4, 7, 9, 13, 14, 16, 22, 25, 27, 28, 34, 36, 40, 41, 44, 46, 53, 61, 71,
-    ],
+    normal: [4, 9, 13, 14, 22, 25, 27, 28, 34, 36, 40, 41, 44, 46, 53, 61, 71],
     elite: [19, 38, 49, 50, 59, 64, 66, 72, 74, 81, 84, 86, 91, 94, 96],
     boss: [32, 43, 54, 69, 78, 87, 98],
     chest: [6, 17, 29, 39, 51, 62, 73],
     legendaryChest: [82, 92],
     item: [3, 12, 23, 31, 42, 52, 65, 75, 83, 93],
     rest: [8, 18, 26, 37, 48, 58, 68, 77, 88, 97],
-    duel: [11, 20, 24, 35, 47, 55, 57, 67, 70, 79, 89, 95],
+    duel: [7, 11, 16, 20, 24, 35, 47, 55, 57, 67, 70, 79, 89, 95],
     trap: [21, 30, 56, 85, 99],
     portal: [15, 33, 45, 60, 76, 90],
   };
@@ -86,6 +84,17 @@ export function restoreGame(game, rng = Math.random) {
     wasLegacyBoard ||= tile.terrain !== tile.biome;
     tile.terrain = tile.biome;
     if (layout && tile.type === "plain") tile.type = layout[tile.pos - 1].type;
+    if (
+      layout &&
+      tile.type === "normal" &&
+      layout[tile.pos - 1].type === "duel"
+    ) {
+      tile.type = "duel";
+      delete tile.monster;
+      delete tile.hp;
+      delete tile.maxHp;
+      delete tile.monsterState;
+    }
     if (tile.type === "chest" && tile.biome === "volcano")
       tile.type = "legendaryChest";
     if (tile.type === "normal" && tile.biome === "volcano") {
@@ -97,8 +106,18 @@ export function restoreGame(game, rng = Math.random) {
     }
   }
   if (oldRules) {
-    for (const p of game.players)
+    game.upgrades ??= [];
+    for (const p of game.players) {
       p.statuses = p.statuses.filter((status) => status.type !== "slipped");
+      const saved = p.sp || 0;
+      const badge =
+        saved > 0 && p.badgeActive && !p.badgeStat && !p.badgeSpentByTrap;
+      grantUpgrade(game, p, saved - Number(badge));
+      if (badge) grantUpgrade(game, p, 1, "badge");
+      delete p.sp;
+      delete p.badgeSpentByTrap;
+    }
+    if (game.phase === "spend") goBack(game);
     if (game.phase === "landing" && game.check?.kind === "rain") {
       game.check = null;
       game.mods = {};
@@ -174,7 +193,6 @@ export function newGame(roster) {
     atk: 1,
     def: 1,
     act: 1,
-    sp: 0,
     alloc: { atk: 0, def: 0, act: 0 },
     badgeActive: false,
     badgeStat: null,
@@ -188,6 +206,7 @@ export function newGame(roster) {
   const turn = (players.find((p) => p.online) || players[0]).id;
   return {
     players,
+    upgrades: [],
     rulesVersion,
     board: board(),
     turn,
@@ -247,27 +266,36 @@ function nextTurn(game) {
   }
 }
 
-function syncBadge(p) {
+function grantUpgrade(game, p, count = 1, kind = "permanent") {
+  if (count > 0) game.upgrades.push({ id: p.id, count, kind });
+}
+
+function pendingUpgrade(game) {
+  return game.upgrades.find((entry) => player(game, entry.id)?.online);
+}
+
+function syncBadge(game, p) {
   const active = equipped(p, "c13");
   if (active === p.badgeActive) return;
-  if (active) p.sp++;
+  if (active) grantUpgrade(game, p, 1, "badge");
   else if (p.badgeStat) {
     p[p.badgeStat]--;
     p.alloc[p.badgeStat]--;
     p.badgeStat = null;
-  } else if (!p.badgeSpentByTrap) p.sp = Math.max(0, p.sp - 1);
-  delete p.badgeSpentByTrap;
+  } else
+    game.upgrades = game.upgrades.filter(
+      (entry) => entry.id !== p.id || entry.kind !== "badge",
+    );
   p.badgeActive = active;
 }
 
-function upgrade(p, stat, spend) {
-  if (spend) {
-    p.sp--;
-    if (p.badgeActive && !p.badgeStat && !p.badgeSpentByTrap)
-      p.badgeStat = stat;
-  }
-  p.alloc[stat]++;
-  p[stat]++;
+function upgrade(p, stat, change = 1) {
+  p.alloc[stat] += change;
+  p[stat] += change;
+}
+
+function permanentUpgrades(p, stat) {
+  return p.alloc[stat] - Number(p.badgeStat === stat);
 }
 
 function removeOne(array, value) {
@@ -275,11 +303,11 @@ function removeOne(array, value) {
   if (index >= 0) array.splice(index, 1);
 }
 
-function removeGear(p, id) {
+function removeGear(game, p, id) {
   removeOne(p.gear, id);
   removeOne(p.locked, id);
   if (id === "l16") p.items = [];
-  syncBadge(p);
+  syncBadge(game, p);
 }
 
 function relocate(game, p, position, death = false, stepwise = false) {
@@ -291,24 +319,27 @@ function relocate(game, p, position, death = false, stepwise = false) {
   p.arrived = ++game.sequence;
   if (moved && equipped(p, "l11")) capHP(p, 1);
   if (dest === 1 && (moved || death) && equipped(p, "l13")) {
-    for (const stat of Object.keys(stats)) upgrade(p, stat, false);
+    for (const stat of Object.keys(stats)) upgrade(p, stat);
     log(game, p.name + " 触发并弃置归途传承印，三项属性各永久 +1。");
-    removeGear(p, "l13");
+    removeGear(game, p, "l13");
   }
 }
 
-function respawn(game, p, duel = false) {
+function respawn(game, p, { duel = false, escaped = false } = {}) {
   // The seal's own death trigger can satisfy the one-legendary discard.
   const lostSeal = equipped(p, "l13");
   relocate(game, p, 1, true);
   p.hp = 10;
   p.statuses = [];
   p.movePenalty = 0;
-  log(game, p.name + " 在起点以 10 点生命重生。");
+  if (!escaped) {
+    log(game, p.name + " 在起点以 10 点生命重生。");
+    grantUpgrade(game, p);
+  }
   phase(game, "end");
   if (!duel && !lostSeal && p.gear.some(legendary)) {
     if (equipped(p, "c16")) {
-      removeGear(p, "c16");
+      removeGear(game, p, "c16");
       log(game, "替偿木偶代替传说装备被弃置。");
     } else phase(game, "deathDiscard", {}, p.id);
   }
@@ -325,10 +356,11 @@ function draw(game, type, count, rng) {
       const owned = (type === "i" ? q.items : q.gear).filter(
         (x) => x === id,
       ).length;
+      const saved = q.resume?.pending;
       const reserved =
-        q.resume?.phase === "offer"
-          ? q.resume.pending.ids.includes(id)
-          : q.resume?.phase === "replace" && q.resume.pending.card === id;
+        saved?.ids?.includes(id) ||
+        saved?.followup?.includes(id) ||
+        saved?.card === id;
       return sum + owned + Number(Boolean(reserved));
     }, 0);
     return Array(Math.max(0, stock - held)).fill(id);
@@ -343,11 +375,18 @@ function draw(game, type, count, rng) {
   return result;
 }
 
-function offer(game, p, ids, canPass = false) {
+function offer(game, p, ids, canPass = false, followup) {
   if (!ids.length) {
     log(game, "牌池暂时没有可领取的卡牌。");
-    phase(game, "end");
-  } else phase(game, "offer", { ids, canPass }, p.id);
+    if (followup?.length) offer(game, p, followup, true);
+    else phase(game, "end");
+  } else phase(game, "offer", { ids, canPass, followup }, p.id);
+}
+
+function finishOffer(game, p) {
+  const { followup } = game.pending;
+  if (followup?.length) offer(game, p, followup, true);
+  else phase(game, "end");
 }
 
 function conflictingCharm(p, card) {
@@ -359,24 +398,24 @@ function receive(game, p, card, replacing) {
   const isItem = card.startsWith("i");
   if (replacing) {
     if (isItem) removeOne(p.items, replacing);
-    else removeGear(p, replacing);
+    else removeGear(game, p, replacing);
   }
   if (
     isItem
       ? p.items.length >= itemLimit(p)
       : p.gear.length >= 3 || conflictingCharm(p, card)
   ) {
-    phase(game, "replace", { card }, p.id);
+    phase(game, "replace", { card, followup: game.pending.followup }, p.id);
     return;
   }
   if (isItem) p.items.push(card);
   else p.gear.push(card);
-  syncBadge(p);
+  syncBadge(game, p);
   log(
     game,
     p.name + (isItem ? " 收下了一件道具。" : " 装备了" + nameOf(card) + "。"),
   );
-  phase(game, "end");
+  finishOffer(game, p);
 }
 
 function startFight(game, options, rng) {
@@ -399,15 +438,15 @@ function settleBattle(game, outcome, rng) {
   if (outcome.type === "pvpWin") {
     const winner = player(game, outcome.winnerId),
       loser = player(game, outcome.loserId);
-    respawn(game, loser, true);
-    winner.sp++;
-    log(game, winner.name + " 赢得决斗，获得 1 技能点。");
+    respawn(game, loser, { duel: true });
+    grantUpgrade(game, winner);
+    log(game, winner.name + " 赢得决斗，获得 1 次升级。");
     if (loser.gear.length + loser.items.length)
       phase(game, "loot", { loser: loser.id }, winner.id);
   } else if (outcome.type === "escape") {
     if (b.monster === "final") {
       log(game, p.name + " 逃离最终头目，按战败结算。");
-      respawn(game, p);
+      respawn(game, p, { escaped: true });
       return;
     }
     if (tile.monster === b.monster) {
@@ -431,13 +470,9 @@ function settleBattle(game, outcome, rng) {
     delete tile.hp;
     delete tile.maxHp;
     delete tile.monsterState;
-    if (tier !== "normal") p.sp++;
-    const reward = tier === "boss" ? "l" : tier === "elite" ? "c" : "i";
-    log(
-      game,
-      p.name + " 击败怪物" + (tier === "normal" ? "。" : "，获得 1 技能点。"),
-    );
-    offer(game, p, draw(game, reward, 1, rng));
+    log(game, p.name + " 击败怪物。");
+    if (tier === "normal") offer(game, p, draw(game, "i", 1, rng));
+    else offer(game, p, draw(game, "l", 3, rng), true, draw(game, "i", 3, rng));
   }
 }
 
@@ -496,12 +531,9 @@ function resolveSpace(game, p, rng) {
       phase(game, "rest");
       return;
     case "trap":
-      if (p.sp > 0) {
-        if (p.sp === 1 && p.badgeActive && !p.badgeStat)
-          p.badgeSpentByTrap = true;
-        p.sp--;
-        log(game, p.name + " 触发陷阱，失去 1 点未分配技能点。");
-      } else log(game, p.name + " 触发陷阱，但没有未分配的技能点。");
+      if (Object.keys(stats).some((stat) => permanentUpgrades(p, stat) > 0))
+        grantUpgrade(game, p, 1, "downgrade");
+      else log(game, p.name + " 触发陷阱，但没有可扣除的永久升级。");
       phase(game, "end");
       return;
     default:
@@ -606,7 +638,7 @@ function applyArrival(game, p) {
     log(game, p.name + " 受到 1 点火山伤害。");
     if (p.hp <= 0) {
       if (equipped(p, "l04")) {
-        removeGear(p, "l04");
+        removeGear(game, p, "l04");
         p.hp = 10;
         log(game, p.name + " 使用凤凰之泪满血复活。");
       } else {
@@ -618,7 +650,12 @@ function applyArrival(game, p) {
   return true;
 }
 
-const rollNames = { move: "移动", rain: "雨林", skirmish: "交锋" };
+const rollNames = {
+  move: "移动",
+  rain: "雨林",
+  skirmish: "交锋",
+  rest: "休息升级",
+};
 
 function showRoll(game, p, rolled = false) {
   const c = game.check;
@@ -649,10 +686,18 @@ function finishRoll(game, p, rng) {
   game.mods = {};
   log(game, p.name + " 的" + rollNames[c.kind] + "判定为 " + c.total + "。");
   if (c.kind === "rain") {
-    if (parityOf(c.total, c.parity) === "odd") {
-      log(game, p.name + " 未能穿过雨林，跳过本回合。");
-      phase(game, "end");
-    } else phase(game, "move", { rainChecked: true });
+    if (c.total < 3) {
+      log(game, p.name + " 雨林判定失败，无法移动。");
+      if (game.phase === "landing") resolveSpace(game, p, rng);
+      else phase(game, "end");
+    } else {
+      game.pending.rainChecked = true;
+      if (c.item) useItem(game, p, c.item, rng);
+    }
+  } else if (c.kind === "rest") {
+    if (c.total >= 5) grantUpgrade(game, p);
+    else log(game, p.name + " 休息格升级判定失败。");
+    phase(game, "end");
   } else if (c.kind === "skirmish") {
     const match = game.pending;
     if (match.first === null) {
@@ -696,21 +741,21 @@ function finishRoll(game, p, rng) {
   }
 }
 
-function rollCheck(game, p, kind, rng) {
+function rollCheck(game, p, kind, rng, item) {
   const mods = game.mods;
   const values = Array.from({ length: mods.extra ? 2 : 1 }, (_, i) =>
     i === 0 && mods.face ? mods.face : 1 + Math.floor(rng() * 6),
   );
-  game.check = { kind, values, weight: mods.weight || 0 };
+  game.check = { kind, values, weight: mods.weight || 0, item };
   delete mods.face;
   showRoll(game, p, true);
 }
 
-function removeStatus(p, key) {
+function removeStatus(game, p, key) {
   if (key === "snare") p.movePenalty = 0;
   else if (key.startsWith("gear-")) removeOne(p.locked, key.slice(5));
   else p.statuses.splice(Number(key), 1);
-  syncBadge(p);
+  syncBadge(game, p);
 }
 
 function statusOptions(p, strong) {
@@ -792,6 +837,14 @@ function useItem(game, p, id, rng) {
     menu(game, "itemTarget", { id });
     return;
   }
+  if (
+    (id === "i05" || id === "i11") &&
+    tileAt(game, p).terrain === "rainforest" &&
+    !game.pending.rainChecked
+  ) {
+    rollCheck(game, p, "rain", rng, id);
+    return;
+  }
   consume(game, p, id);
   switch (id) {
     case "i01":
@@ -807,8 +860,16 @@ function useItem(game, p, id, rng) {
       land(game, p, rng);
       break;
     case "i06":
+      grantUpgrade(
+        game,
+        p,
+        Object.keys(stats).reduce(
+          (count, stat) => count + permanentUpgrades(p, stat),
+          0,
+        ),
+      );
+      if (p.badgeStat) grantUpgrade(game, p, 1, "badge");
       for (const stat of Object.keys(stats)) {
-        p.sp += p.alloc[stat];
         p[stat] -= p.alloc[stat];
         p.alloc[stat] = 0;
       }
@@ -849,13 +910,13 @@ function applyTarget(game, p, parts) {
     if (id === "i17") q.movePenalty -= 2;
     else if (id === "i13") {
       q.locked.push(opt);
-      syncBadge(q);
-    } else if (id === "i14") removeStatus(q, opt);
+      syncBadge(game, q);
+    } else if (id === "i14") removeStatus(game, q, opt);
     else if (id === "i15") {
       q.statuses = [];
       q.movePenalty = 0;
       q.locked = [];
-      syncBadge(q);
+      syncBadge(game, q);
     }
   }
 }
@@ -863,12 +924,10 @@ function applyTarget(game, p, parts) {
 function boardItems(game, p) {
   if (game.check)
     return unique(p.items).filter((id) => ["i01", "i08", "i19"].includes(id));
-  const preRoll = game.phase === "move" || game.phase === "skirmish";
+  const preRoll = ["move", "skirmish", "rest"].includes(game.phase);
   const roaming = ["move", "end", "landing", "finish", "rest"].includes(
     game.phase,
   );
-  const needsRainCheck =
-    tileAt(game, p).terrain === "rainforest" && !game.pending.rainChecked;
   return unique(p.items).filter((id) => {
     if (id === "i18") return preRoll && !game.mods.face;
     if (id === "i09") return preRoll && !game.mods.extra;
@@ -879,8 +938,7 @@ function boardItems(game, p) {
       return p.pos < 100 && ["move", "landing"].includes(game.phase);
     if (id === "i06") return Object.values(p.alloc).some((n) => n > 0);
     if (id === "i10") return !tileAt(game, p).banana;
-    if (id === "i11")
-      return game.phase === "move" && p.pos > 1 && !needsRainCheck;
+    if (id === "i11") return game.phase === "move" && p.pos > 1;
     if (["i13", "i14", "i15", "i17"].includes(id))
       return targetOptions(game, p, id).length > 0;
     return false;
@@ -888,18 +946,23 @@ function boardItems(game, p) {
 }
 
 function actorId(game) {
-  return game.battle?.actorId ?? game.actor;
+  return pendingUpgrade(game)?.id ?? game.battle?.actorId ?? game.actor;
 }
 
 function actions(game, id) {
   const p = player(game, id);
   if (!p?.online || game.winner || actorId(game) !== id) return [];
+  const required = pendingUpgrade(game);
+  if (required) {
+    const loss = required.kind === "downgrade";
+    return Object.entries(stats)
+      .filter(([stat]) => !loss || permanentUpgrades(p, stat) > 0)
+      .map(([stat, name]) =>
+        action("upgrade:" + stat, name + (loss ? " −1" : " +1")),
+      );
+  }
   if (game.phase === "battle") return battleActions(game, id);
   let options;
-  const statOptions = (prefix) =>
-    Object.entries(stats).map(([key, name]) =>
-      action(prefix + ":" + key, name + " +1"),
-    );
   if (game.phase === "itemTarget")
     return [
       ...targetOptions(game, p, game.pending.id),
@@ -925,16 +988,17 @@ function actions(game, id) {
         options = [action("clash", "投掷交锋判定")];
         break;
       case "rest":
-        options = [action("heal", "回复 5 点生命"), ...statOptions("rest")];
+        options = [
+          action("heal", "回复 5 点生命"),
+          action("rest", "掷骰争取升级 · 5–6 成功"),
+        ];
         break;
       case "finish":
         options = [
           action("challenge", "挑战原初之王", "final"),
-          action("return", "返回起点 · 技能点 +1"),
+          action("return", "返回起点 · 升级一次"),
         ];
         break;
-      case "spend":
-        return [...statOptions("upgrade"), action("cancel", "取消")];
       case "offer":
         return [
           ...game.pending.ids.map((card) =>
@@ -971,13 +1035,6 @@ function actions(game, id) {
       default:
         return [];
     }
-  if (
-    !game.check &&
-    p.sp > 0 &&
-    ["move", "end", "landing", "finish", "rest"].includes(game.phase)
-  ) {
-    options.push(action("spend", "分配技能点（" + p.sp + "）"));
-  }
   return [
     ...options,
     ...boardItems(game, p).map((c) =>
@@ -991,9 +1048,23 @@ export function act(game, playerId, actionId, rng = Math.random) {
     throw new Error("当前无法执行这个行动");
   const p = player(game, playerId);
   game.movements = [];
+  const required = pendingUpgrade(game);
+  if (required) {
+    const stat = actionId.split(":")[1];
+    const loss = required.kind === "downgrade";
+    upgrade(p, stat, loss ? -1 : 1);
+    if (required.kind === "badge") p.badgeStat = stat;
+    if (--required.count === 0) removeOne(game.upgrades, required);
+    if (stat === "act") refreshAttackAllowance(game, p.id);
+    log(
+      game,
+      p.name + " 的" + stats[stat] + (loss ? "降低 1 点。" : "提升 1 点。"),
+    );
+    return;
+  }
   if (game.phase === "battle") {
     const outcome = actBattle(game, playerId, actionId, rng);
-    game.players.forEach(syncBadge);
+    game.players.forEach((p) => syncBadge(game, p));
     settleBattle(game, outcome, rng);
     if (game.phase === "end" && !player(game).online) nextTurn(game);
     if (game.log.length > 120) game.log.splice(0, game.log.length - 120);
@@ -1030,16 +1101,7 @@ export function act(game, playerId, actionId, rng = Math.random) {
       phase(game, "end");
       break;
     case "rest":
-      upgrade(p, choice, false);
-      log(game, p.name + " 在休息格提升" + stats[choice] + "。");
-      phase(game, "end");
-      break;
-    case "spend":
-      menu(game, "spend");
-      break;
-    case "upgrade":
-      upgrade(p, choice, true);
-      goBack(game);
+      rollCheck(game, p, "rest", rng);
       break;
     case "cancel":
       goBack(game);
@@ -1049,8 +1111,8 @@ export function act(game, playerId, actionId, rng = Math.random) {
       break;
     case "return":
       relocate(game, p, 1);
-      p.sp++;
-      log(game, p.name + " 放弃最终挑战，返乡获得 1 技能点。");
+      grantUpgrade(game, p);
+      log(game, p.name + " 放弃最终挑战，返乡获得 1 次升级。");
       phase(game, "end");
       break;
     case "take":
@@ -1061,10 +1123,10 @@ export function act(game, playerId, actionId, rng = Math.random) {
       break;
     case "decline":
     case "passOffer":
-      phase(game, "end");
+      finishOffer(game, p);
       break;
     case "discard":
-      removeGear(p, choice);
+      removeGear(game, p, choice);
       phase(game, "end");
       break;
     case "loot":
@@ -1074,7 +1136,7 @@ export function act(game, playerId, actionId, rng = Math.random) {
         verb === "loot-item"
           ? loser.items.splice(Number(choice), 1)[0]
           : choice;
-      if (verb === "loot") removeGear(loser, card);
+      if (verb === "loot") removeGear(game, loser, card);
       receive(game, p, card);
       break;
     }
@@ -1171,6 +1233,16 @@ function describe(game, viewer) {
   if (game.winner)
     return player(game, game.winner).name + " 击败原初之王，赢得本局。";
   const who = player(game, actorId(game))?.name || "";
+  const required = pendingUpgrade(game);
+  if (required)
+    return (
+      who +
+      (required.kind === "downgrade"
+        ? " · 选择一项已升级的属性降低 1 点"
+        : required.kind === "badge"
+          ? " · 立即选择悟技徽章加成的属性"
+          : " · 立即选择一项属性升级")
+    );
   if (game.phase === "battle") return who + " · " + game.battle.detail;
   if (game.phase === "itemTarget")
     return (
@@ -1185,9 +1257,8 @@ function describe(game, viewer) {
     end: "本回合的格子已结算",
     skirmish: "投骰进行同格交锋",
     landing: "结算当前格，或使用跨步符前进",
-    rest: "选择回复生命或提升一项属性",
-    finish: "挑战原初之王，或返回起点获得 1 技能点",
-    spend: "选择要提升的属性",
+    rest: "选择回复生命或掷骰争取升级",
+    finish: "挑战原初之王，或返回起点并升级一次",
     offer: "选择一张奖励牌",
     replace: "选择要替换的牌，或放弃新牌",
     loot: "从落败者的装备与道具中选择一件",
@@ -1241,7 +1312,6 @@ export function view(game, id) {
       atk: p.atk,
       def: p.def,
       act: p.act,
-      sp: p.sp,
       gear: p.gear,
       locked: p.locked,
       statuses: p.statuses,
@@ -1254,7 +1324,7 @@ export function view(game, id) {
     board: game.board.map(({ monsterState, encounter, ...tile }) => tile),
     turn: game.turn,
     actor: actorId(game),
-    phase: game.phase,
+    phase: pendingUpgrade(game) && !game.winner ? "upgrade" : game.phase,
     round: game.round,
     battle,
     actions: actions(game, id),

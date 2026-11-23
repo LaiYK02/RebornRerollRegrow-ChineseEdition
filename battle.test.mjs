@@ -31,14 +31,69 @@ function choose(s, id, rng = ones) {
 }
 function play(s, id, rng = ones) {
   let outcome = choose(s, id, rng);
+  let available = choices(s).filter((id) => id !== "surrender");
   while (
-    choices(s).length === 1 &&
-    ["confirm", "confirmAttack", "confirmEquipment"].includes(choices(s)[0])
-  )
-    outcome = choose(s, choices(s)[0], rng);
+    available.length === 1 &&
+    ["confirm", "confirmAttack", "confirmEquipment"].includes(available[0])
+  ) {
+    outcome = choose(s, available[0], rng);
+    available = choices(s).filter((id) => id !== "surrender");
+  }
   return outcome;
 }
 const choices = (s) => battleActions(s, s.battle.actorId).map((a) => a.id);
+
+test("先声双刃让 3 行动点的玩家在首轮再攻击 3 次", () => {
+  const s = encounter("b03", { act: 3, gear: ["c09"] });
+  for (let i = 0; i < 3; i++) play(s, "attack");
+  assert.ok(choices(s).includes("repeatOpening"));
+  play(s, "repeatOpening");
+  assert.equal(s.battle.remaining, 3);
+  for (let i = 0; i < 3; i++) play(s, "attack");
+  assert.equal(s.battle.phase, "defend");
+  play(s, "defend");
+  for (let i = 0; i < 3; i++) play(s, "attack");
+  assert.equal(s.battle.phase, "defend");
+});
+
+test("最终头目效果不用其他头目名字，自爆致死仍判挑战失败", () => {
+  const s = encounter("final", { hp: 5, atk: 1, def: 2 }, {}, () => 0.4);
+  assert.ok(
+    !s.battle.effects.some((text) =>
+      /傲慢|嫉妒|暴怒|怠惰|贪婪|暴食|色欲/.test(text),
+    ),
+  );
+  s.battle.active = ["b06.2"];
+  s.battle.round = 10;
+  play(s, "attack");
+  assert.equal(play(s, "defend", sixes).type, "monsterLoss");
+  assert.ok(s.battle.hp > 0);
+});
+
+test("在第十轮前击败会自爆的原初之王，需活过爆炸才能获胜", () => {
+  for (const [hp, result] of [
+    [8, "monsterLoss"],
+    [9, "victory"],
+  ]) {
+    const s = encounter("final", { hp, atk: 4 }, {}, () => 0.4);
+    s.battle.active = ["b06.2"];
+    s.battle.hp = 1;
+    assert.equal(play(s, "attack", sixes).type, result);
+    assert.equal(s.players[0].hp, hp - 8);
+    assert.equal(s.battle.hp, hp === 8 ? s.battle.maxHp : 0);
+  }
+});
+
+test("吸血鬼的基础生命为 4，各高阶地形继续叠加", () => {
+  for (const [biome, hp] of [
+    ["plains", 4],
+    ["desert", 4],
+    ["rainforest", 5],
+    ["volcano", 6],
+  ]) {
+    assert.equal(encounter("e04", {}, { biome }).battle.hp, hp);
+  }
+});
 
 test("色欲使用原始单骰，必中刻印优先，行动次数与缴械额外伤害照常", () => {
   const s = encounter("b07", {
@@ -120,7 +175,7 @@ test("怪物直接使用攻防值，玩家每次掷骰后都可确认", () => {
   assert.deepEqual(s.battle.defenseRoll.dice, []);
   assert.equal(s.battle.defenseRoll.total, 3);
   assert.equal(s.battle.hp, 2);
-  assert.deepEqual(choices(s), ["confirm"]);
+  assert.deepEqual(choices(s), ["confirm", "surrender"]);
   play(s, "confirm");
   assert.equal(s.battle.hp, 1);
 
@@ -131,7 +186,7 @@ test("怪物直接使用攻防值，玩家每次掷骰后都可确认", () => {
   assert.deepEqual(t.battle.attackRoll.dice, []);
   choose(t, "defend", die(2));
   assert.equal(t.players[0].hp, 10);
-  assert.deepEqual(choices(t), ["confirm"]);
+  assert.deepEqual(choices(t), ["confirm", "surrender"]);
   play(t, "confirm");
   assert.equal(t.players[0].hp, 9);
 });
@@ -303,15 +358,15 @@ test("贪婪盾牌抵挡攻击，偶数伤害判定被免疫，攻击无视向�
   assert.equal(s.battle.last.margin, 3);
 });
 
-test("暴食按装备增幅、逐轮失去防御并于第五轮后引爆", () => {
+test("暴食按装备增幅、逐轮失去防御并于第十轮后引爆", () => {
   const s = encounter("b06", { gear: ["c11"], def: 20 });
   assert.equal(s.battle.def, 22);
   assert.equal(s.battle.atk, 5);
   let outcome;
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 10; i++) {
     play(s, "attack");
     outcome = play(s, "defend");
-    if (i < 4) assert.equal(outcome, null);
+    if (i < 9) assert.equal(outcome, null);
   }
   assert.equal(outcome.type, "monsterWin");
   assert.equal(s.players[0].hp, 2);

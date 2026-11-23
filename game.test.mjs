@@ -9,11 +9,12 @@ const pair = () =>
     { id: "a", name: "甲" },
     { id: "b", name: "乙" },
   ]);
+const actor = (game) => view(game, game.turn).actor;
 const choose = (game, action, rng = () => 0) =>
-  act(game, game.battle?.actorId || game.actor, action, rng);
+  act(game, actor(game), action, rng);
 function step(game, action, rng = () => 0) {
   choose(game, action, rng);
-  const available = ids(game);
+  const available = ids(game).filter((id) => id !== "surrender");
   if (
     available.length === 1 &&
     ["check:accept", "confirm"].includes(available[0])
@@ -21,15 +22,22 @@ function step(game, action, rng = () => 0) {
     choose(game, available[0], rng);
 }
 const die = (n) => () => (n - 0.5) / 6;
-const ids = (g, id = g.battle?.actorId || g.actor) =>
-  view(g, id).actions.map((a) => a.id);
+const ids = (g, id = actor(g)) => view(g, id).actions.map((a) => a.id);
 
-test("跨步符可直接离开雨林，香蕉皮截停确认后的移动并结算落点", () => {
+test("跨步符也须通过雨林判定，香蕉皮截停确认后的移动并结算落点", () => {
   const g = solo(),
     [p] = g.players;
   p.pos = 55;
   p.items = ["i05"];
-  choose(g, "use:i05");
+  choose(g, "use:i05", die(2));
+  assert.equal(p.pos, 55);
+  choose(g, "check:accept");
+  assert.equal(p.pos, 55);
+  assert.deepEqual(p.items, ["i05"]);
+  step(g, "end");
+  choose(g, "use:i05", die(3));
+  assert.equal(p.pos, 55);
+  choose(g, "check:accept");
   assert.equal(p.pos, 56);
   assert.equal(g.check, null);
   const h = solo(),
@@ -45,6 +53,79 @@ test("跨步符可直接离开雨林，香蕉皮截停确认后的移动并结�
   assert.equal(h.board[5].banana, undefined);
   assert.equal(h.board[7].banana, true);
   assert.deepEqual(q.statuses, []);
+});
+
+test("雨林回城道具要过判定，成功回城没有升级", () => {
+  const g = solo(),
+    [p] = g.players;
+  p.pos = 57;
+  p.items = ["i11"];
+  step(g, "use:i11", die(1));
+  assert.equal(p.pos, 57);
+  assert.deepEqual(p.items, ["i11"]);
+  step(g, "end");
+  step(g, "use:i11", die(6));
+  assert.equal(p.pos, 1);
+  assert.deepEqual(p.items, []);
+  assert.equal(g.upgrades.length, 0);
+});
+
+test("休息格掷出 4 时既不升级也不回血", () => {
+  const g = solo(),
+    [p] = g.players;
+  p.hp = 4;
+  g.phase = "rest";
+  choose(g, "rest", die(4));
+  assert.equal(g.check.total, 4);
+  choose(g, "check:accept");
+  assert.equal(g.phase, "end");
+  assert.equal(g.upgrades.length, 0);
+  assert.equal(p.hp, 4);
+});
+
+test("怪物战确认放弃才会死亡回城，必须分配升级并处理弃牌", () => {
+  const g = solo(),
+    [p] = g.players;
+  p.pos = 3;
+  p.gear = ["l02"];
+  step(g, "roll", die(1));
+  assert.throws(() => choose(g, "confirmSurrender"));
+  choose(g, "surrender");
+  assert.deepEqual(ids(g), ["confirmSurrender", "cancelSurrender"]);
+  assert.equal(p.pos, 4);
+  choose(g, "cancelSurrender");
+  assert.equal(g.battle.phase, "attack");
+  assert.equal(p.hp, 10);
+  choose(g, "surrender");
+  choose(g, "confirmSurrender");
+  assert.equal(p.pos, 1);
+  assert.equal(p.hp, 10);
+  assert.equal(g.battle, null);
+  assert.equal(view(g, p.id).phase, "upgrade");
+  assert.throws(() => choose(g, "discard:l02"));
+  step(g, "upgrade:act");
+  assert.equal(p.act, 2);
+  step(g, "discard:l02");
+  assert.deepEqual(p.gear, []);
+});
+
+test("旧存档的未分配升级必须逐次分配，保留原卡和已升属性", () => {
+  const g = solo(),
+    [p] = g.players;
+  g.rulesVersion = 3;
+  delete g.upgrades;
+  p.sp = 2;
+  p.atk = 2;
+  p.alloc.atk = 1;
+  p.items = ["i03"];
+  restoreGame(g);
+  assert.equal("sp" in p, false);
+  assert.throws(() => choose(g, "roll"));
+  step(g, "upgrade:def");
+  step(g, "upgrade:act");
+  assert.deepEqual([p.atk, p.def, p.act], [2, 2, 2]);
+  assert.deepEqual(p.items, ["i03"]);
+  assert.equal(view(g, p.id).phase, "move");
 });
 
 test("沙漠同格先交锋，只由挑战者结算落点", () => {
@@ -105,6 +186,8 @@ test("the board has 100 positions, symmetric portals and 25 active tiles per ter
   );
   assert.equal(g.board[0].type, "start");
   assert.equal(g.board.at(-1).type, "finish");
+  assert.equal(g.board[6].type, "duel");
+  assert.equal(g.board[15].type, "duel");
   const bosses = g.board.filter((t) => t.type === "boss");
   assert.deepEqual(bosses.map((t) => t.boss).sort(), [
     "b01",
@@ -280,15 +363,18 @@ test("terrain, traps, portals, heals and rest upgrades resolve at their proper t
   const h = solo(),
     [q] = h.players;
   q.pos = 55;
-  step(h, "roll", die(3));
+  step(h, "roll", die(2));
   assert.equal(q.pos, 55);
   assert.equal(h.phase, "end");
   step(h, "end");
-  step(h, "roll", die(2));
+  step(h, "roll", die(3));
   assert.equal(h.phase, "move");
   step(h, "roll", die(3));
   assert.equal(q.pos, 58);
-  step(h, "rest:def");
+  step(h, "rest", die(5));
+  assert.equal(q.def, 1);
+  assert.deepEqual(ids(h), ["upgrade:atk", "upgrade:def", "upgrade:act"]);
+  step(h, "upgrade:def");
   assert.equal(q.def, 2);
   assert.equal(q.alloc.def, 1);
   step(h, "end");
@@ -350,7 +436,10 @@ test("barricades, ties in same-space clashes and duels at distant sites", () => 
   for (let i = 0; i < 20 && j.battle; i++) step(j, ids(j)[0], die(3));
   assert.equal(j.phase, "loot");
   assert.equal(j.actor, "b");
-  assert.equal(d.sp, 1);
+  assert.equal(actor(j), "a");
+  step(j, "upgrade:def");
+  assert.equal(actor(j), "b");
+  step(j, "upgrade:atk");
   assert.equal(c.pos, 1);
   assert.equal(c.hp, 10);
   assert.deepEqual(c.gear, ["l15", "l07"]);
@@ -383,7 +472,7 @@ test("monster damage persists on escape, resets on death and grants all tier rew
   assert.equal(g.battle.hp, 2);
   step(g, "use:i04");
   assert.equal(g.board[18].hp, 2);
-  assert.equal(p.sp, 0);
+  assert.equal(g.upgrades.length, 0);
   step(g, "end");
   p.pos = 18;
   step(g, "roll", die(1));
@@ -398,12 +487,13 @@ test("monster damage persists on escape, resets on death and grants all tier rew
   assert.equal(p.hp, 10);
   assert.equal(g.board[18].hp, 3);
   assert.equal(g.phase, "deathDiscard");
+  step(g, "upgrade:def");
   step(g, "discard:l08");
   assert.deepEqual(p.gear, ["l03"]);
-  for (const [pos, tier, prefix, sp] of [
-    [4, "normal", "i", 0],
-    [19, "elite", "c", 1],
-    [32, "boss", "l", 1],
+  for (const [pos, tier] of [
+    [4, "normal"],
+    [19, "elite"],
+    [32, "boss"],
   ]) {
     const h = solo(),
       [q] = h.players;
@@ -414,8 +504,16 @@ test("monster damage persists on escape, resets on death and grants all tier rew
     assert.equal(h.board[pos - 1].type, tier);
     for (let i = 0; i < 40 && h.battle; i++) step(h, ids(h)[0], die(2));
     assert.equal(h.phase, "offer");
-    assert.equal(q.sp, sp);
-    assert.ok(view(h, "a").actions[0].card.startsWith(prefix));
+    assert.equal(h.upgrades.length, 0);
+    const offered = () =>
+      view(h, "a").actions.flatMap((a) => (a.card ? [a.card] : []));
+    if (tier !== "normal") {
+      assert.equal(offered().length, 3);
+      assert.ok(offered().every((id) => cards[id].kind === "传说装备"));
+      step(h, "passOffer");
+      assert.equal(offered().length, 3);
+    }
+    assert.ok(offered().every((id) => cards[id].kind === "道具"));
     assert.equal(h.board[pos - 1].monster, h.board[pos - 1].boss);
   }
 });
@@ -429,8 +527,7 @@ test("equipment replacement, badge withdrawal, bag loss, parity conflict and ite
     step(g, "take:" + id);
   }
   offer("c13");
-  assert.equal(p.sp, 1);
-  step(g, "spend");
+  assert.equal(view(g, p.id).phase, "upgrade");
   step(g, "upgrade:atk");
   assert.equal(p.atk, 2);
   offer("c07");
@@ -447,6 +544,7 @@ test("equipment replacement, badge withdrawal, bag loss, parity conflict and ite
   assert.equal(p.items.length, 7);
   offer("c13");
   step(g, "replace:l16");
+  step(g, "upgrade:def");
   assert.deepEqual(p.items, []);
   p.items = ["i01", "i02", "i03", "i05", "i08"];
   offer("i18");
@@ -476,9 +574,13 @@ test("returning to Start, legendary sacrifice, lock immunity, cleanses and redis
   p.pos = 99;
   step(g, "roll", die(4));
   step(g, "return");
-  assert.deepEqual([p.pos, p.atk, p.def, p.act, p.sp], [1, 2, 2, 2, 1]);
+  assert.deepEqual([p.pos, p.atk, p.def, p.act], [1, 2, 2, 2]);
+  step(g, "upgrade:atk");
   step(g, "use:i06");
-  assert.deepEqual([p.atk, p.def, p.act, p.sp], [1, 1, 1, 4]);
+  assert.deepEqual([p.atk, p.def, p.act], [1, 1, 1]);
+  for (let i = 0; i < 4; i++) step(g, "upgrade:act");
+  assert.equal(p.act, 5);
+  assert.equal(g.upgrades.length, 0);
   const h = solo(),
     [b] = h.players;
   b.pos = 79;
@@ -502,7 +604,7 @@ test("offline seats retain progress, skip turns and can act after reconnecting",
     [p, q] = g.players;
   q.items = ["i04"];
   q.gear = ["l03"];
-  q.sp = 2;
+  q.atk = 3;
   q.pos = 32;
   setOnline(g, "a", false);
   assert.equal(g.turn, "b");
@@ -517,7 +619,7 @@ test("offline seats retain progress, skip turns and can act after reconnecting",
   setOnline(g, "b", false);
   assert.deepEqual(q.items, ["i04"]);
   assert.deepEqual(q.gear, ["l03"]);
-  assert.equal(q.sp, 2);
+  assert.equal(q.atk, 3);
   setOnline(g, "a", false);
   assert.deepEqual(ids(g, "a"), []);
   setOnline(g, "b", true);
@@ -526,26 +628,30 @@ test("offline seats retain progress, skip turns and can act after reconnecting",
   assert.equal(p.online, false);
 });
 
-test("陷阱扣除未分配技能点，最终头目逃跑立即按败北弃置传说装备", () => {
+test("陷阱降低一项已升级属性，从原初之王逃跑要弃装备且无升级", () => {
   const g = solo(),
     [p] = g.players;
   p.pos = 20;
-  p.sp = 2;
+  p.atk = 2;
+  p.alloc.atk = 1;
   step(g, "roll", die(1));
   assert.equal(g.board[20].type, "trap");
-  assert.equal(p.sp, 1);
+  assert.deepEqual(ids(g), ["upgrade:atk"]);
+  step(g, "upgrade:atk");
+  assert.equal(p.atk, 1);
   assert.equal(g.phase, "end");
 
   p.pos = 100;
-  p.gear = ["c13", "l02"];
+  p.gear = ["l03", "l02"];
   p.items = ["i04"];
   g.phase = "finish";
   step(g, "challenge");
   step(g, "use:i04");
   assert.equal(p.pos, 1);
   assert.equal(g.phase, "deathDiscard");
-  assert.ok(ids(g).includes("discard:c13"));
-  step(g, "discard:c13");
+  assert.equal(g.upgrades.length, 0);
+  assert.ok(ids(g).includes("discard:l03"));
+  step(g, "discard:l03");
   assert.deepEqual(p.gear, ["l02"]);
   assert.equal(g.phase, "end");
 });
@@ -558,32 +664,35 @@ test("悟技徽章进入传说宝箱，归途传承印存活返乡时也弃置",
   step(g, "check:accept");
   assert.ok(ids(g).includes("take:c13"));
   step(g, "take:c13");
-  assert.equal(p.sp, 1);
+  step(g, "upgrade:atk");
   p.pos = 100;
   p.gear.push("l13");
   g.phase = "finish";
   step(g, "return");
   assert.equal(p.pos, 1);
-  assert.deepEqual([p.atk, p.def, p.act], [2, 2, 2]);
+  assert.deepEqual([p.atk, p.def, p.act], [3, 2, 2]);
   assert.deepEqual(p.gear, ["c13"]);
 });
 
-test("陷阱扣掉徽章赠送的点数后，弃置徽章不会再扣后来获得的点数", () => {
+test("陷阱只降低永久升级，弃置悟技徽章才会移除徽章加成", () => {
   const g = solo(),
     [p] = g.players;
   p.pos = 81;
   choose(g, "roll", die(1));
   step(g, "check:accept");
   step(g, "take:c13");
-  assert.equal(p.sp, 1);
+  step(g, "upgrade:act");
+  p.atk = 2;
+  p.alloc.atk = 1;
   p.pos = 20;
   step(g, "end");
   step(g, "roll", die(1));
-  assert.equal(p.sp, 0);
-  p.sp++;
+  assert.deepEqual(ids(g), ["upgrade:atk"]);
+  step(g, "upgrade:atk");
+  assert.deepEqual([p.atk, p.act], [1, 2]);
   g.phase = "deathDiscard";
   step(g, "discard:c13");
-  assert.equal(p.sp, 1);
+  assert.equal(p.act, 1);
 });
 
 test("a disconnected player can resume a private choice or a wounded monster", () => {
@@ -650,7 +759,7 @@ function chooseAdventureAction(g, snapshot) {
   const p = snapshot.players.find((p) => p.id === snapshot.actor);
   const byId = (id) => options.find((a) => a.id === id);
   const score = (a) => value[a.card] || 0;
-  if (g.phase === "replace") {
+  if (snapshot.phase !== "upgrade" && g.phase === "replace") {
     const worst = options
       .filter((a) => a.id.startsWith("replace:"))
       .sort((a, b) => score(a) - score(b))[0];
@@ -658,7 +767,10 @@ function chooseAdventureAction(g, snapshot) {
       ? worst
       : byId("decline");
   }
-  if (g.phase === "offer" || g.phase === "loot")
+  if (
+    snapshot.phase !== "upgrade" &&
+    (g.phase === "offer" || g.phase === "loot")
+  )
     return [...options].sort((a, b) => score(b) - score(a))[0];
   const improve =
     p.atk < 3
@@ -671,14 +783,14 @@ function chooseAdventureAction(g, snapshot) {
   const priority = [
     "challenge",
     ...(p.hp < 9 ? ["heal", "use:i02"] : []),
-    "spend",
     "upgrade:" + improve,
-    "rest:" + improve,
+    "rest",
     "use:i07:act",
     "use:i03",
     "attack",
     "defend",
     "confirm",
+    "repeatOpening",
     "equipment",
     "end",
   ];
@@ -700,7 +812,7 @@ for (const count of [1, 4]) {
       const rng = generator(13244);
       let actionsTaken = 0;
       while (!g.winner && actionsTaken < 12000) {
-        const id = g.battle?.actorId || g.actor;
+        const id = actor(g);
         const snapshot = view(g, id);
         const move = chooseAdventureAction(g, snapshot);
         assert.ok(move, "missing legal action during " + g.phase);

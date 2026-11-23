@@ -94,7 +94,7 @@ export const tiles = {
   portal: ["传送门", "portal", "#7259a8"],
   rest: ["休息", "rest", "#ac7837"],
   duel: ["决斗", "duel", "#a54755"],
-  trap: ["陷阱 · 技能点 −1", "skull", "#9b381e"],
+  trap: ["陷阱 · 永久升级 −1", "skull", "#9b381e"],
   plain: ["路途", "step", "#78866a"],
 };
 export const hearts = (hp, max = 10) =>
@@ -325,7 +325,7 @@ function hud(p, me, b) {
     p.def +
     icon("step") +
     p.act +
-    (me ? " · 技能点 " + p.sp : icon("item") + p.itemCount) +
+    (me ? "" : icon("item") + p.itemCount) +
     "</div></section>"
   );
 }
