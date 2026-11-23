@@ -13,6 +13,8 @@ import {
   lobby,
   game,
   board,
+  chatMessages,
+  diceLayout,
   pawns,
   parityLabel,
 } from "./assets/ui.mjs";
@@ -55,8 +57,9 @@ let room = null,
   lastPoll = 0;
 let snapshot = "",
   noticeTimer,
-  animToken = 0,
-  animating = false,
+  combatSequence = 0,
+  playback = null,
+  shownWinner = null,
   diceAnimation = null,
   reminderTimer,
   reminderKey = "",
@@ -66,6 +69,7 @@ let snapshot = "",
   rulesCache = "",
   muted = store.get("muted") ?? false;
 const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const visualQueue = [];
 document
   .querySelectorAll("[data-icon]")
   .forEach((el) => el.replaceWith(fragment(icon(el.dataset.icon))));
@@ -463,19 +467,20 @@ function soloStart(reset = false) {
     revision: 0,
   });
 }
-function renderRoom() {
+function renderRoom(displayGame = room?.game, combatResolving = false) {
   if (!room) return;
   const chatInput = $("#chat input"),
     textValue = chatInput?.value,
     focus = document.activeElement === chatInput,
     selection = chatInput?.selectionStart;
   const oldChat = $(".chat-msg"),
-    chatAtEnd =
-      !oldChat ||
-      oldChat.scrollHeight - oldChat.scrollTop - oldChat.clientHeight < 10,
+    chatAtEnd = atEnd(oldChat),
     scroll = oldChat?.scrollTop,
     logTop = $(".logbox")?.scrollTop;
-  app.innerHTML = room.game ? game(room, !!soloState) : lobby(room);
+  app.innerHTML = displayGame
+    ? game({ ...room, game: displayGame }, !!soloState, combatResolving)
+    : lobby(room);
+  if (controlsLocked()) $(".action-row")?.setAttribute("inert", "");
   document.body.classList.toggle("playing", !!room.game);
   const input = $("#chat input");
   if (input && textValue) input.value = textValue;
@@ -487,6 +492,30 @@ function renderRoom() {
   if (next) next.scrollTop = chatAtEnd ? next.scrollHeight : scroll;
   if ($(".logbox") && logTop) $(".logbox").scrollTop = logTop;
 }
+function atEnd(el) {
+  return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 10;
+}
+function renderLiveRoom() {
+  renderRoom();
+  const winner = room?.game?.winner;
+  if (winner && winner !== shownWinner) {
+    shownWinner = winner;
+    sparks(innerWidth / 2, innerHeight * 0.4, 60);
+    tone(880);
+  }
+}
+function cancelPlayback() {
+  playback?.abort();
+  playback = null;
+  visualQueue.length = 0;
+  diceAnimation?.();
+  combatSequence = 0;
+  shownWinner = null;
+}
+function controlsLocked() {
+  return !!playback;
+}
+
 function setRoom(next) {
   const signature = JSON.stringify(next);
   lastPoll = Date.now();
@@ -494,25 +523,55 @@ function setRoom(next) {
   const old = room;
   room = next;
   snapshot = signature;
-  if (old?.id !== next.id || (!old?.game && next.game)) {
-    animToken++;
-    animating = false;
+  const sameGame =
+    old?.id === next.id &&
+    old?.game &&
+    next.game &&
+    old.game.matchId === next.game.matchId;
+  const events = next.game?.combatEvents || [];
+  if (!sameGame) {
+    cancelPlayback();
+    combatSequence = events.at(-1)?.seq ?? 0;
     if (next.game) travel();
   }
-  const sameGame = old?.game && next.game && next.id === old.id;
+  const strikes = events.filter((event) => event.seq > combatSequence);
+  combatSequence = Math.max(combatSequence, events.at(-1)?.seq ?? 0);
   const moves =
     sameGame && next.game.movementSequence > old.game.movementSequence
       ? next.game.movements
       : [];
   if (
     sameGame &&
-    next.game.dice?.rollId &&
+    !reduced &&
+    next.game.dice?.values?.length &&
     next.game.dice.rollId !== old.game.dice?.rollId
-  )
-    animateDice(next.game.dice);
-  if (!animating) renderRoom();
-  if (moves.length && !reduced) cameraMove(next.game, moves);
+  ) {
+    visualQueue.push({
+      dice: next.game.dice,
+      game: strikes.length ? old.game : next.game,
+      resolving: strikes.length > 0,
+    });
+  }
+  for (const strike of strikes) {
+    if (strike.frame?.battle)
+      visualQueue.push({ strike, game: next.game, log: old.game.log });
+  }
+  if (moves.length && !reduced) visualQueue.push({ game: next.game, moves });
+  const alreadyPlaying = controlsLocked();
+  if (alreadyPlaying) {
+    const messages = $(".chat-msg");
+    if (messages && JSON.stringify(old.chat) !== JSON.stringify(next.chat)) {
+      const scrollToEnd = atEnd(messages);
+      messages.innerHTML = chatMessages(next.chat);
+      if (scrollToEnd) messages.scrollTop = messages.scrollHeight;
+    }
+  } else if (visualQueue.length) {
+    void playVisuals();
+  } else {
+    renderLiveRoom();
+  }
   scheduleTurnReminder(next);
+  if (strikes.length || alreadyPlaying) return;
   if (
     next.game &&
     old?.game &&
@@ -522,18 +581,6 @@ function setRoom(next) {
   ) {
     sparks(innerWidth * 0.74, innerHeight * 0.76, 12);
     tone(620);
-  }
-  if (
-    next.game?.battle?.monster &&
-    old?.game?.battle?.monster === next.game.battle.monster &&
-    next.game.battle.hp < old.game.battle.hp
-  ) {
-    sparks(innerWidth * 0.52, innerHeight * 0.42, 20);
-    tone(235);
-  }
-  if (next.game?.winner && !old?.game?.winner) {
-    sparks(innerWidth / 2, innerHeight * 0.4, 60);
-    tone(880);
   }
   if (
     next.game &&
@@ -565,7 +612,7 @@ function scheduleTurnReminder(next) {
   app.querySelector(".turn-reminder")?.classList.remove("turn-reminder");
   if (!key) return;
   const remind = () => {
-    if (animating || busy || app.classList.contains("rolling-dice")) {
+    if (controlsLocked() || busy) {
       reminderTimer = setTimeout(remind, 500);
       return;
     }
@@ -577,79 +624,293 @@ function scheduleTurnReminder(next) {
   reminderTimer = setTimeout(remind, 5000);
 }
 
-function animateDice(dice) {
+function pauseVisual(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve(false);
+      return;
+    }
+    const timer = setTimeout(() => finish(true), ms);
+    const abort = () => finish(false);
+    function finish(completed) {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", abort);
+      resolve(completed);
+    }
+    signal.addEventListener("abort", abort, { once: true });
+  });
+}
+
+async function playVisuals() {
+  const controller = new AbortController();
+  const { signal } = controller;
+  playback = controller;
+  let focusDice = false;
+  try {
+    while (visualQueue.length && !signal.aborted) {
+      const job = visualQueue.shift();
+      if (job.dice) {
+        renderRoom(job.game, job.resolving);
+        await animateDice(job.dice, signal);
+        focusDice = true;
+      } else if (job.strike) {
+        diceAnimation?.();
+        await animateStrike(job, signal);
+        focusDice = false;
+      } else {
+        renderRoom(job.game);
+        await cameraMove(job.game, job.moves, signal);
+        focusDice = false;
+      }
+    }
+  } finally {
+    if (playback === controller) {
+      playback = null;
+      renderLiveRoom();
+      if (
+        focusDice &&
+        room?.game?.actor === room?.you &&
+        document.activeElement === document.body
+      )
+        $(
+          ".actions [data-action^='confirm'], .actions [data-action='check:accept']",
+        )?.focus({ preventScroll: true });
+    }
+  }
+}
+
+async function animateDice(dice, signal) {
   diceAnimation?.();
-  if (reduced) return;
   const panel = document.createElement("div");
   panel.className = "dice-animation";
-  panel.setAttribute("aria-hidden", "true");
-  panel.innerHTML = '<div class="rolling-faces"></div><b></b>';
+  panel.innerHTML =
+    '<div class="rolling-faces" aria-hidden="true"></div><b role="status"></b>' +
+    '<div class="dice-pager" hidden><button type="button" aria-label="上一页骰子">‹</button>' +
+    '<span></span><button type="button" aria-label="下一页骰子">›</button>' +
+    '<button type="button" aria-label="关闭骰子结果">×</button></div>';
   const heading = panel.querySelector("b");
   const faces = panel.querySelector(".rolling-faces");
-  const visible = dice.values;
-  const columns = Math.max(8, Math.ceil(Math.sqrt(visible.length * 2)));
-  faces.style.setProperty(
-    "--die-size",
-    "clamp(12px, " + 72 / columns + "vw, 56px)",
-  );
+  const pager = panel.querySelector(".dice-pager");
+  const [previous, next, closeDice] = pager.querySelectorAll("button");
+  const pageNumber = pager.querySelector("span");
   const glyphs = "⚀⚁⚂⚃⚄⚅";
-  const diceElements = visible.map(() => document.createElement("span"));
-  faces.append(...diceElements);
-  const show = (values) => {
-    values.forEach((n, i) => {
-      diceElements[i].textContent = glyphs[n - 1];
-    });
+  let pageSize = 1,
+    page = 0,
+    tick = 0,
+    revealed = false,
+    dismiss;
+  const pageCount = () => Math.ceil(dice.values.length / pageSize);
+  function scheduleDismiss() {
+    clearTimeout(dismiss);
+    if (pageCount() === 1) dismiss = setTimeout(() => diceAnimation?.(), 710);
+  }
+  const show = () => {
+    for (let i = 0; i < faces.children.length; i++) {
+      const n = revealed
+        ? dice.values[page * pageSize + i]
+        : 1 + ((tick + i) % 6);
+      faces.children[i].textContent = glyphs[n - 1];
+    }
   };
-  show(visible.map(() => 1));
+  function drawPage() {
+    const length = Math.min(pageSize, dice.values.length - page * pageSize);
+    faces.replaceChildren(
+      ...Array.from({ length }, () => document.createElement("span")),
+    );
+    pager.hidden = !revealed || pageCount() < 2;
+    previous.disabled = page === 0;
+    next.disabled = page >= pageCount() - 1;
+    pageNumber.textContent = page + 1 + " / " + pageCount();
+    show();
+  }
+  function fit() {
+    const {
+      columns,
+      size,
+      pageSize: capacity,
+    } = diceLayout(
+      dice.values.length,
+      Math.max(1, Math.floor(innerWidth * 0.94) - 40),
+      Math.max(1, Math.floor(innerHeight * 0.49)),
+    );
+    page = Math.floor((page * pageSize) / capacity);
+    pageSize = capacity;
+    faces.style.setProperty("--die-size", size + "px");
+    faces.style.inlineSize = columns * size + "px";
+    drawPage();
+    if (revealed) scheduleDismiss();
+  }
+  previous.onclick = () => {
+    page--;
+    drawPage();
+  };
+  next.onclick = () => {
+    page++;
+    drawPage();
+  };
+  closeDice.onclick = () => diceAnimation?.();
+  fit();
   heading.textContent = dice.label + " · 掷骰中";
   app.classList.add("rolling-dice");
   document.body.append(panel);
-  let face = 1;
+  window.addEventListener("resize", fit);
   const rolling = setInterval(() => {
-    show(visible.map((_, i) => 1 + ((face + i) % 6)));
-    face++;
+    tick++;
+    show();
   }, 75);
-  const reveal = setTimeout(() => {
-    clearInterval(rolling);
-    show(visible);
-    heading.textContent =
-      dice.label + " · " + dice.total + parityLabel(dice.parity);
-    panel.classList.add("revealed");
-    app.classList.remove("rolling-dice");
-    if (
-      room?.game?.actor === room?.you &&
-      document.activeElement === document.body
-    )
-      $(
-        ".actions [data-action^='confirm'], .actions [data-action='check:accept']",
-      )?.focus({ preventScroll: true });
-  }, 740);
-  const dismiss = setTimeout(() => diceAnimation?.(), 1450);
   diceAnimation = () => {
     clearInterval(rolling);
-    clearTimeout(reveal);
     clearTimeout(dismiss);
+    window.removeEventListener("resize", fit);
     panel.remove();
     app.classList.remove("rolling-dice");
     diceAnimation = null;
   };
+  if (!(await pauseVisual(740, signal))) return;
+  clearInterval(rolling);
+  revealed = true;
+  drawPage();
+  heading.textContent =
+    dice.label + " · " + dice.total + parityLabel(dice.parity);
+  panel.classList.add("revealed");
+  app.classList.remove("rolling-dice");
+  scheduleDismiss();
 }
 
-async function cameraMove(g, moves) {
-  const tag = ++animToken;
-  animating = true;
-  const stage = $(".stage");
-  if (!stage) {
-    animating = false;
+function effectAt(layer, className, bounds, content = "") {
+  const effect = document.createElement("div");
+  effect.className = className;
+  effect.style.left = bounds.x + "px";
+  effect.style.top = bounds.y + "px";
+  effect.innerHTML = content;
+  layer.append(effect);
+  return effect;
+}
+
+async function animateStrike({ strike, game: next, log }, signal) {
+  const { attacker, defender, hit, fallen, frame } = strike;
+  const players = next.players.map((p) => ({
+    ...p,
+    ...frame.players.find((fighter) => fighter.id === p.id),
+  }));
+  renderRoom(
+    {
+      ...next,
+      battle: frame.battle,
+      actor: attacker ?? defender ?? frame.battle.actorId,
+      players,
+      winner: null,
+      log,
+    },
+    true,
+  );
+
+  const layer = $(".combat-effects");
+  const area = layer.getBoundingClientRect();
+  const fighters = new Map(
+    [...app.querySelectorAll("[data-combatant]")].map((el) => [
+      el.dataset.combatant,
+      el.querySelector("[data-combat-focus]") || el,
+    ]),
+  );
+  const positions = new Map(
+    [...fighters].map(([id, el]) => {
+      const { left, top, width, height } = el.getBoundingClientRect();
+      const x = left - area.left,
+        y = top - area.top;
+      return [
+        id,
+        {
+          x,
+          y,
+          width,
+          height,
+          center: { x: x + width / 2, y: y + height / 2 },
+        },
+      ];
+    }),
+  );
+  const source = fighters.get(attacker),
+    target = fighters.get(defender);
+  const origin = positions.get(attacker)?.center;
+  const contact = positions.get(defender)?.center;
+  if (!reduced && source && target) {
+    const dx = contact.x - origin.x,
+      dy = contact.y - origin.y;
+    source.style.setProperty("--lunge-x", dx * 0.68 + "px");
+    source.style.setProperty("--lunge-y", dy * 0.68 + "px");
+    source.classList.add("combat-lunging");
+    const trail = effectAt(layer, "combat-trail", origin);
+    trail.setAttribute("aria-hidden", "true");
+    trail.style.width = Math.hypot(dx, dy) + "px";
+    trail.style.setProperty("--trail-angle", Math.atan2(dy, dx) + "rad");
+    tone(360);
+    if (!(await pauseVisual(365, signal))) return;
+    target.style.setProperty("--recoil", Math.sign(dx) * 20 + "px");
+  }
+  if (target) {
+    const reaction = hit ? "hit" : "guard";
+    target.classList.add("combat-" + reaction);
+    effectAt(
+      layer,
+      "combat-result " + reaction,
+      contact,
+      icon(hit ? "sword" : "shield") + "<b>" + (hit ? "命中" : "格挡") + "</b>",
+    );
+    tone(hit ? 155 : 535);
+    if (!reduced && hit) navigator.vibrate?.(45);
+  }
+  if (!fallen.length) {
+    await pauseVisual(reduced ? 580 : 560, signal);
     return;
   }
+  if (target && !(await pauseVisual(reduced ? 350 : 405, signal))) return;
+  for (const id of fallen) {
+    const el = fighters.get(id),
+      bounds = positions.get(id);
+    if (!el) continue;
+    if (reduced) {
+      el.classList.add("combat-fallen");
+    } else {
+      const pieces = effectAt(layer, "combat-fracture", bounds);
+      pieces.setAttribute("aria-hidden", "true");
+      pieces.style.width = bounds.width + "px";
+      pieces.style.height = bounds.height + "px";
+      for (let i = 0; i < 4; i++) {
+        const shard = document.createElement("div");
+        shard.className = "combat-shard";
+        const copy = el.cloneNode(true);
+        copy.classList.remove("combat-lunging", "combat-hit", "combat-guard");
+        copy.removeAttribute("data-combatant");
+        copy.removeAttribute("data-combat-focus");
+        copy
+          .querySelector("[data-combat-focus]")
+          ?.removeAttribute("data-combat-focus");
+        shard.append(copy);
+        pieces.append(shard);
+      }
+      el.classList.add("combat-broken");
+    }
+    effectAt(
+      layer,
+      "combat-result fallen",
+      bounds.center,
+      icon("skull") + "<b>击败</b>",
+    );
+  }
+  tone(105);
+  await pauseVisual(reduced ? 620 : 950, signal);
+}
+
+async function cameraMove(g, moves, signal) {
+  const stage = $(".stage");
+  if (!stage) return;
   const drawPlayers = g.players.map((p) => ({
     ...p,
     pos: moves.find(({ id }) => id === p.id)?.from ?? p.pos,
   }));
   stage.innerHTML = board({ ...g, players: drawPlayers });
   const world = stage.firstElementChild;
-  const pause = (ms) => new Promise((r) => setTimeout(r, ms));
   function aim(pos) {
     const cell = world.querySelector('[data-tile="' + pos + '"]');
     if (!cell) return;
@@ -675,12 +936,11 @@ async function cameraMove(g, moves) {
   }
   world.style.transition = "transform .32s ease-in-out";
   aim(moves[0].from);
-  await pause(340);
+  if (!(await pauseVisual(340, signal))) return;
   for (const { id, from, to, stepwise } of moves) {
     const p = drawPlayers.find((player) => player.id === id);
     const steps = stepwise ? Math.min(12, Math.abs(to - from)) : 1;
     for (let i = 1; i <= steps; i++) {
-      if (tag !== animToken) return;
       const old = p.pos;
       p.pos = from + Math.round(((to - from) * i) / steps);
       for (const n of [old, p.pos]) {
@@ -690,22 +950,15 @@ async function cameraMove(g, moves) {
         cell.classList.toggle("occupied", !!on.length);
       }
       aim(p.pos);
-      await pause(stepwise ? 345 : 500);
+      if (!(await pauseVisual(stepwise ? 345 : 500, signal))) return;
     }
   }
-  if (tag !== animToken) return;
   world.style.transform = "none";
-  await pause(330);
-  if (tag === animToken) {
-    animating = false;
-    renderRoom();
-  }
+  await pauseVisual(330, signal);
 }
 function returnMenu(clear = false) {
   version++;
-  animToken++;
-  animating = false;
-  diceAnimation?.();
+  cancelPlayback();
   scheduleTurnReminder(null);
   soloState = null;
   room = null;
@@ -717,14 +970,13 @@ function returnMenu(clear = false) {
   showMenu();
 }
 async function request(route, body = {}) {
-  if (busy) return;
+  if (busy || (route === "action" && controlsLocked())) return;
   busy = true;
   version++;
   try {
     if (soloState) {
       if (route === "restart") {
         soloStart(true);
-        travel();
         return;
       }
       if (route === "destroy") {
@@ -839,7 +1091,7 @@ async function click(e) {
       return;
     }
     if (d.tile) {
-      if (animating) return;
+      if (controlsLocked()) return;
       const t = room.game.board[Number(d.tile) - 1],
         r = regions.find((x) => x[0] === t.biome);
       modal(
@@ -849,7 +1101,9 @@ async function click(e) {
           (t.terrain !== "plain" ? " · 触发特殊地形" : "") +
           (t.to ? " · 通往第 " + t.to + " 格" : "") +
           "</p>" +
-          (t.banana ? "<p>这里放置了香蕉皮，经过的玩家会停在此格。</p>" : "") +
+          (t.banana
+            ? "<p>这里放置了香蕉皮。经过的玩家会停在此格，可用净化清除并继续移动。</p>"
+            : "") +
           (t.monster
             ? button(
                 "openMonster",
@@ -868,12 +1122,11 @@ async function click(e) {
       );
       return;
     }
-    if (d.action && app.classList.contains("rolling-dice")) return;
+    if (d.action && controlsLocked()) return;
     if (
       d.action &&
       ["offer", "replace", "deathDiscard"].includes(room?.game?.phase) &&
-      !overlay.firstChild &&
-      !animating
+      !overlay.firstChild
     ) {
       const offer = room.game.actions.find((a) => a.id === d.action);
       if (offer?.card) {
@@ -882,7 +1135,7 @@ async function click(e) {
       }
     }
     if (d.action) {
-      if (!busy && !animating) {
+      if (!busy) {
         diceAnimation?.();
         tone(495);
         close();
@@ -968,7 +1221,7 @@ async function click(e) {
                 "</span>",
             )
             .join("") +
-          "</div><p>路线按数字从 1 到 100 蛇形前进，每 25 格更换环境。平原无额外效果。落在沙漠后退 1 格。从雨林主动移动前须判定，3 点及以上才可移动。落在火山失去 1 点生命。火山中的传说宝箱只提供传说装备。</p>",
+          "</div><p>路线按数字从 1 到 100 蛇形前进，每 25 格更换环境，各区域内的格子随机排列。每种地形效果每回合最多生效一次。平原无额外效果。抵达沙漠先后退 1 格，再结算落点。从雨林主动移动前须判定，3 点及以上才可移动。抵达火山失去 1 点生命。踩到香蕉皮停下时直接结算该格，免于沙漠后退。使用净化可清除香蕉皮并继续移动。</p>",
       );
       return;
     }

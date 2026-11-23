@@ -4,7 +4,8 @@ import { readFile, access } from "node:fs/promises";
 import { cards } from "./cards.mjs";
 import { newGame, view } from "./game.mjs";
 import { startBattle } from "./battle.mjs";
-import { art, battle, board, game as renderGame } from "./assets/ui.mjs";
+import * as ui from "./assets/ui.mjs";
+const { art, battle, board, game: renderGame } = ui;
 
 test("决斗中的两张角色卡高亮，损失与回复的生命反映在红灰心数量", () => {
   const state = newGame(roster);
@@ -20,12 +21,12 @@ test("决斗中的两张角色卡高亮，损失与回复的生命反映在红�
   state.players[0].hp = 6;
   const first = renderGame(makeRoom(), false);
   assert.equal([...first.matchAll(/class="hud-card [^"]*dueling/g)].length, 2);
-  assert.equal([...first.matchAll(/class="grayheart"/g)].length, 4);
+  const hudHearts = (html) =>
+    [...html.split('<div class="hud">')[1].matchAll(/class="grayheart"/g)]
+      .length;
+  assert.equal(hudHearts(first), 4);
   state.players[0].hp = 8;
-  assert.equal(
-    [...renderGame(makeRoom(), false).matchAll(/class="grayheart"/g)].length,
-    2,
-  );
+  assert.equal(hudHearts(renderGame(makeRoom(), false)), 2);
 });
 
 const roster = ["黎明", "正午", "黄昏", "夜游"].map((name, index) => ({
@@ -34,6 +35,51 @@ const roster = ["黎明", "正午", "黄昏", "夜游"].map((name, index) => ({
   color: "#348f98",
   online: true,
 }));
+
+test("决斗的挑战者居左、原驻玩家居右，且高亮随行动者切换", () => {
+  const state = newGame(roster);
+  const duel = startBattle(state, { attackerId: "0", defenderId: "2" });
+  state.phase = "battle";
+  const stage = () => battle(view(state, "0"));
+  assert.match(
+    stage(),
+    /data-combatant="2".*黄昏.*挑战者.*data-combatant="0" aria-current="true".*黎明.*擂主.*当前行动/,
+  );
+  duel.actorId = "2";
+  assert.match(
+    stage(),
+    /data-combatant="2" aria-current="true".*黄昏.*挑战者.*当前行动.*data-combatant="0">.*黎明.*擂主/,
+  );
+});
+
+test("野怪战中骑士居左，怪物和活跃分裂体有独立动画目标", () => {
+  const state = newGame(roster);
+  startBattle(state, {
+    attackerId: "0",
+    monsterId: "e03",
+    monsterState: { form: "n01", slimes: 2 },
+  });
+  const html = battle(view(state, "0"));
+  assert.match(
+    html,
+    /data-combatant="0".*data-combatant="\$monster".*data-combat-focus.*当前目标/,
+  );
+  assert.equal([...html.matchAll(/data-combat-focus/g)].length, 1);
+});
+
+test("骰子以完整格子排入可用空间，过多时保留剩余骰子的页", () => {
+  for (const [count, width, height] of [
+    [1, 255, 180],
+    [80, 255, 180],
+    [600, 255, 180],
+  ]) {
+    const { columns, size, pageSize } = ui.diceLayout(count, width, height);
+    assert.ok(columns * size <= width);
+    assert.ok(Math.ceil(pageSize / columns) * size <= height);
+    assert.equal(pageSize < count, count === 600);
+    assert.ok(size >= 18);
+  }
+});
 
 test("贪婪护盾耐久与暴怒基础攻击和蓄力在战斗界面独立显示", () => {
   const state = newGame(roster);

@@ -190,15 +190,18 @@ export function chat(room) {
     '<section class="chat"><h3>' +
     icon("chat") +
     '房间聊天</h3><div class="chat-msg" aria-live="polite">' +
-    (room.chat.length
-      ? room.chat
-          .map((m) => "<p><b>" + esc(m.name) + "</b>　" + esc(m.text) + "</p>")
-          .join("")
-      : '<small class="muted">消息仅房内可见</small>') +
+    chatMessages(room.chat) +
     '</div><form id="chat"><input maxlength="240" aria-label="聊天内容" placeholder="说点什么…" autocomplete="off"><button class="soft" aria-label="发送">' +
     icon("send") +
     "</button></form></section>"
   );
+}
+export function chatMessages(messages) {
+  return messages.length
+    ? messages
+        .map((m) => "<p><b>" + esc(m.name) + "</b>　" + esc(m.text) + "</p>")
+        .join("")
+    : '<small class="muted">消息仅房内可见</small>';
 }
 export function lobby(r) {
   const host = r.hostId === r.you;
@@ -410,6 +413,22 @@ export function parityLabel(parity) {
   return "";
 }
 
+export function diceLayout(count, width, height) {
+  const minimum = Math.min(18, width, height);
+  const maxColumns = Math.floor(width / minimum);
+  const pageSize = Math.min(count, maxColumns * Math.floor(height / minimum));
+  const idealRatio = Math.max(1, Math.min(2, width / height));
+  let best = { columns: 1, size: minimum, balance: Infinity };
+  for (let columns = 1; columns <= Math.min(pageSize, maxColumns); columns++) {
+    const rows = Math.ceil(pageSize / columns);
+    const size = Math.floor(Math.min(56, width / columns, height / rows));
+    const balance = Math.abs(columns / rows - idealRatio);
+    if (size > best.size || (size === best.size && balance < best.balance))
+      best = { columns, size, balance };
+  }
+  return { columns: best.columns, size: best.size, pageSize };
+}
+
 function rollLine(r, label) {
   return r
     ? "<span><b>" +
@@ -423,66 +442,34 @@ function rollLine(r, label) {
         "</span>"
     : "";
 }
-export function battle(g) {
-  const b = g.battle,
-    c = cards[b.form || b.monster],
-    op = g.players.find((p) => p.id === b.actors?.[1]);
-  const title =
-    (b.slimes ? "分裂史莱姆" : c?.name) ||
-    b.actors.map((id) => g.players.find((p) => p.id === id)?.name).join(" ⚔ ");
-  const effects = (b.effects || [])
-    .map(
-      (e, i) =>
-        "<p><b>" + String(i + 1).padStart(2, "0") + "</b>　" + esc(e) + "</p>",
-    )
-    .join("");
-  const activeStates = Object.entries(b.statuses || {})
-    .filter(([, v]) => v.length)
-    .map(
-      ([id, v]) =>
-        "<p>" +
-        esc(g.players.find((p) => p.id === id)?.name || c?.name || "对手") +
-        " · " +
-        esc(v.join("、")) +
-        "</p>",
-    )
-    .join("");
+const monsterFighter = "$monster";
+function monsterName(b) {
+  return b.slimes ? "分裂史莱姆" : cards[b.form || b.monster]?.name || "怪物";
+}
+
+function combatCard(id, p, b, active, role = "") {
+  const monster = id === monsterFighter;
+  const name = monster ? monsterName(b) : p?.name || "骑士";
+  const stats = monster ? b : b.combatants?.[id] || p;
   return (
-    '<section class="battle"><small class="kicker">' +
-    esc(c?.kind || "骑士决斗") +
-    " · 第 " +
-    b.round +
-    ' 轮</small><div class="versus"><b>' +
-    icon("sword") +
-    " 攻击 " +
-    esc(b.atk ?? op?.atk ?? "—") +
-    (b.rageBonus !== undefined && (b.rageBonus || b.atk !== b.baseAtk)
-      ? '<small class="attack-breakdown">基础 ' +
-        esc(b.baseAtk) +
-        (b.rageBonus ? " · 蓄力 +" + esc(b.rageBonus) : "") +
-        "</small>"
+    '<article class="combat-card' +
+    (active ? " combat-current" : "") +
+    (monster ? " combat-monster" : "") +
+    '" data-combatant="' +
+    esc(id) +
+    '"' +
+    (active ? ' aria-current="true"' : "") +
+    '><header class="combat-name"><h3>' +
+    esc(name) +
+    "</h3>" +
+    (active || role
+      ? '<div class="combat-role">' +
+        (role ? "<small>" + role + "</small>" : "") +
+        (active ? '<small class="combat-turn">当前行动</small>' : "") +
+        "</div>"
       : "") +
-    "</b><h2>" +
-    esc(title) +
-    "</h2><b>" +
-    icon("shield") +
-    " 防御 " +
-    esc(b.def ?? op?.def ?? "—") +
-    "</b></div>" +
-    (b.shieldMax
-      ? '<div class="boss-shield">' +
-        icon("shield") +
-        ' 额外护盾 <meter min="0" max="' +
-        b.shieldMax +
-        '" value="' +
-        b.shield +
-        '" aria-label="剩余护盾"></meter><b>' +
-        b.shield +
-        " / " +
-        b.shieldMax +
-        "</b></div>"
-      : "") +
-    (b.slimes
+    "</header>" +
+    (monster && b.slimes
       ? '<div class="slime-pair">' +
         ["左侧", "右侧"]
           .map((label, index) => {
@@ -491,8 +478,12 @@ export function battle(g) {
             const hp = defeated ? 0 : target ? b.hp : b.maxHp;
             return (
               '<div class="split-slime ' +
-              (target ? "target" : defeated ? "defeated" : "") +
-              '">' +
+              (target
+                ? 'target" data-combat-focus'
+                : defeated
+                  ? 'defeated"'
+                  : '"') +
+              ">" +
               art("n01", "battle-art") +
               hearts(hp, b.maxHp) +
               "<b>" +
@@ -507,9 +498,91 @@ export function battle(g) {
           })
           .join("") +
         "</div>"
-      : hearts(b.hp ?? op?.hp ?? 10, b.maxHp || 10) +
-        art(c?.id || "knight", "battle-art")) +
-    '<div class="battle-rolls">' +
+      : (monster
+          ? art(b.form || b.monster, "battle-art")
+          : knight(p || {}, "battle-art token-knight")) +
+        hearts(monster ? b.hp : (p?.hp ?? 10), monster ? b.maxHp : 10)) +
+    '<div class="combat-stats"><span>' +
+    icon("sword") +
+    " 攻击 " +
+    esc(stats?.atk ?? "—") +
+    "</span><span>" +
+    icon("shield") +
+    " 防御 " +
+    esc(stats?.def ?? "—") +
+    "</span></div>" +
+    (monster &&
+    b.rageBonus !== undefined &&
+    (b.rageBonus || b.atk !== b.baseAtk)
+      ? '<small class="attack-breakdown">基础 ' +
+        esc(b.baseAtk) +
+        (b.rageBonus ? " · 蓄力 +" + esc(b.rageBonus) : "") +
+        "</small>"
+      : "") +
+    (monster && b.shieldMax
+      ? '<div class="boss-shield">' +
+        icon("shield") +
+        ' 额外护盾 <meter min="0" max="' +
+        esc(b.shieldMax) +
+        '" value="' +
+        esc(b.shield) +
+        '" aria-label="剩余护盾"></meter><b>' +
+        esc(b.shield) +
+        " / " +
+        esc(b.shieldMax) +
+        "</b></div>"
+      : "") +
+    "</article>"
+  );
+}
+
+export function battle(g) {
+  const b = g.battle,
+    c = cards[b.form || b.monster],
+    first = b.first ?? b.actors[0],
+    second = b.second ?? (b.monster ? monsterFighter : b.actors[1]),
+    current = [first, second].includes(g.actor) ? g.actor : b.actorId;
+  const seats = b.monster
+    ? [[first], [second]]
+    : [
+        [second, "挑战者"],
+        [first, "擂主"],
+      ];
+  const effects = (b.effects || [])
+    .map(
+      (e, i) =>
+        "<p><b>" + String(i + 1).padStart(2, "0") + "</b>　" + esc(e) + "</p>",
+    )
+    .join("");
+  const activeStates = Object.entries(b.statuses || {})
+    .filter(([, v]) => v.length)
+    .map(
+      ([id, v]) =>
+        "<p>" +
+        esc(g.players.find((p) => p.id === id)?.name || monsterName(b)) +
+        " · " +
+        esc(v.join("、")) +
+        "</p>",
+    )
+    .join("");
+  return (
+    '<section class="battle"><h2 class="kicker">' +
+    esc(b.monster ? cards[b.monster]?.kind || c?.kind : "骑士决斗") +
+    " · 第 " +
+    esc(b.round) +
+    ' 轮</h2><div class="combat-line">' +
+    seats
+      .map(([id, role]) =>
+        combatCard(
+          id,
+          g.players.find((p) => p.id === id),
+          b,
+          id === current,
+          role,
+        ),
+      )
+      .join('<span class="combat-divider">' + icon("duel") + "</span>") +
+    '</div><div class="combat-effects" aria-live="polite"></div><div class="battle-rolls">' +
     rollLine(b.attackRoll, "攻击判定") +
     rollLine(b.defenseRoll, "防御判定") +
     '</div><div class="passives">' +
@@ -519,19 +592,24 @@ export function battle(g) {
     "</div></section>"
   );
 }
-export function game(r, solo) {
+export function game(r, solo, combatResolving = false) {
   const g = r.game,
     me = g.players.find((p) => p.id === r.you),
     current = g.players.find((p) => p.id === (g.actor || g.turn)),
     win = g.players.find((p) => p.id === g.winner);
-  const actions = g.actions || [];
+  const actions = combatResolving ? [] : g.actions || [];
   return (
     '<section class="game"><div class="game-top"><span>' +
     icon("flag") +
     "　第 " +
     esc(g.round ?? 1) +
     " 轮　<b>" +
-    esc(current?.name || "骑士") +
+    esc(
+      current?.name ||
+        (g.actor === monsterFighter && g.battle
+          ? monsterName(g.battle)
+          : "骑士"),
+    ) +
     '</b> 的回合</span><span class="toolbar">' +
     button("legend", "地图图例", "map", "mini") +
     button("roomOptions", "房间", "users", "mini") +
@@ -571,7 +649,7 @@ export function game(r, solo) {
     '</div><div class="actions" ' +
     (win ? "hidden" : "") +
     "><p><b>" +
-    esc(g.prompt || "选择行动") +
+    esc(combatResolving ? "战斗结算中…" : g.prompt || "选择行动") +
     '</b></p><div class="action-row">' +
     actions
       .map(
@@ -585,7 +663,7 @@ export function game(r, solo) {
       )
       .join("") +
     "</div>" +
-    (g.dice?.values?.length
+    (!combatResolving && g.dice?.values?.length
       ? '<small class="dice-read">' +
         icon("dice") +
         " " +

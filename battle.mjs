@@ -1,6 +1,23 @@
 import { cards, monsterProfile } from "./cards.mjs";
 
 const MONSTER = "$monster";
+const COMBAT_EVENT_LIMIT = 24;
+const COMBAT_FRAME_FIELDS = [
+  "actors",
+  "first",
+  "second",
+  "monster",
+  "form",
+  "hp",
+  "maxHp",
+  "actorId",
+  "phase",
+  "round",
+  "slimes",
+  "shield",
+  "attackRoll",
+  "defenseRoll",
+];
 const statNames = { atk: "攻击", def: "防御", act: "行动" };
 const statusNames = {
   envy: "嫉妒诅咒",
@@ -37,9 +54,11 @@ const cardName = (id) => cards[id]?.name || id;
 function gearCount(s, id, card) {
   if (id === MONSTER || status(s, id).gearSeal) return 0;
   const p = player(s, id);
+  const f = s.battle.fighters[id];
   if (
     (p.locked || []).includes(card) ||
-    s.battle.fighters[id].locked.includes(card)
+    f.locked.includes(card) ||
+    f.curseLocks?.includes(card)
   )
     return 0;
   return p.gear.filter((entry) => entry === card).length;
@@ -112,13 +131,17 @@ function removeEffect(s, key) {
   log(s, `封印了${name(s, MONSTER)}的效果「${effectText(s, key)}」。`);
 }
 
-function playerStats(s, id) {
+export function playerStats(s, id) {
   const p = player(s, id),
     v = status(s, id);
   if (v.knight) return { atk: 2, def: 2, act: 1 };
-  const act = p.act + (v.act || 0);
-  let atk = p.atk;
-  let def = p.def;
+  const disabledBadge =
+    !s.battle.monster && p.badgeStat && !gearCount(s, id, "c13")
+      ? p.badgeStat
+      : null;
+  const act = p.act + (v.act || 0) - Number(disabledBadge === "act");
+  let atk = p.atk - Number(disabledBadge === "atk");
+  let def = p.def - Number(disabledBadge === "def");
   if (gearCount(s, id, "l14")) atk = def = act;
   atk += (v.atk || 0) + (p.hp >= 6 ? gearCount(s, id, "l07") : 0);
   def += (v.def || 0) + (p.hp <= 5 ? gearCount(s, id, "l07") : 0);
@@ -163,18 +186,29 @@ function stats(s, id) {
   return id === MONSTER ? monsterStats(s) : playerStats(s, id);
 }
 
+function monsterDisplay(s) {
+  const { atk, def } = monsterStats(s);
+  return {
+    atk,
+    def,
+    baseAtk: s.battle.base.atk,
+    rageBonus: status(s, MONSTER).rage || 0,
+    shieldMax: effect(s, "b05.3") ? 20 : 0,
+  };
+}
+
+function displayedStatuses(s) {
+  return Object.fromEntries(
+    Object.keys(s.battle.fighters).map((id) => [
+      id,
+      statusKeys(s, id, true).map((key) => battleText(s, statusName(key))),
+    ]),
+  );
+}
+
 function sync(s) {
   const b = s.battle;
-  if (b.monster) {
-    const { atk, def } = monsterStats(s);
-    Object.assign(b, {
-      atk,
-      def,
-      baseAtk: b.base.atk,
-      rageBonus: status(s, MONSTER).rage || 0,
-      shieldMax: effect(s, "b05.3") ? 20 : 0,
-    });
-  }
+  if (b.monster) Object.assign(b, monsterDisplay(s));
   b.effects = b.active.map((key) => effectText(s, key));
   b.detail =
     b.phase === "done"
@@ -190,12 +224,49 @@ function sync(s) {
           openingFollowup: "先声双刃 · 再行动一次，或转入防御",
           surrenderConfirm: "确认放弃将按死亡结算，返回起点",
         }[b.phase] || "战斗结算中";
-  b.statuses = Object.fromEntries(
-    Object.keys(b.fighters).map((id) => [
-      id,
-      statusKeys(s, id, true).map((key) => battleText(s, statusName(key))),
+  b.statuses = displayedStatuses(s);
+}
+
+function combatFrame(s) {
+  const b = s.battle;
+  // The replay frame is shared with every viewer.
+  const battle = Object.fromEntries(
+    COMBAT_FRAME_FIELDS.filter((key) => b[key] !== undefined).map((key) => [
+      key,
+      b[key],
     ]),
   );
+  if (b.monster) Object.assign(battle, monsterDisplay(s));
+  battle.effects = b.active.map((key) => effectText(s, key));
+  battle.statuses = displayedStatuses(s);
+  return structuredClone({
+    battle,
+    players: b.actors.map((id) => {
+      const { name, color, hp } = player(s, id);
+      return { id, name, color, hp, ...playerStats(s, id) };
+    }),
+  });
+}
+
+function recordCombatEvent(s, frame, attacker, defender, hit) {
+  const fallen = frame.players
+    .filter(({ id, hp: before }) => before > 0 && hp(s, id) <= 0)
+    .map(({ id }) => id);
+  const b = s.battle;
+  const split = b.nextSlime && b.slimes !== frame.battle.slimes;
+  if (frame.battle.hp > 0 && (b.hp <= 0 || split)) fallen.push(MONSTER);
+  s.combatSequence = (s.combatSequence ?? 0) + 1;
+  const events = (s.combatEvents ??= []);
+  events.push({
+    seq: s.combatSequence,
+    attacker,
+    defender,
+    hit,
+    fallen,
+    frame,
+  });
+  if (events.length > COMBAT_EVENT_LIMIT)
+    events.splice(0, events.length - COMBAT_EVENT_LIMIT);
 }
 
 export function startBattle(
@@ -230,6 +301,7 @@ export function startBattle(
     b.fighters[id] = {
       status: {},
       locked: [],
+      curseLocks: [],
       turns: 0,
       survived: false,
       chalice: 0,
@@ -411,9 +483,12 @@ function endTurn(s) {
   if (next.status.disarm <= next.turns) delete next.status.disarm;
   if (b.side === b.first) {
     if (effect(s, "b06.2") && b.round >= 10) {
+      const frame = combatFrame(s);
       log(s, `${name(s, MONSTER)}在第 10 轮结束时自爆！`);
       explode(s);
-      if (checkEnd(s)) return;
+      const ended = checkEnd(s);
+      recordCombatEvent(s, frame, null, b.first, true);
+      if (ended) return;
     }
     b.round++;
   }
@@ -565,6 +640,7 @@ function resolveStrike(s) {
     target = rival(b, actor),
     a = b.attackRoll,
     d = b.defenseRoll;
+  const frame = combatFrame(s);
   const { hit, margin, shield } = checkStrikes(s);
   b.shield -= shield;
   if (shield) log(s, `护盾抵挡 ${shield} 点攻击判定，剩余耐久 ${b.shield}。`);
@@ -644,6 +720,7 @@ function resolveStrike(s) {
     log(s, `${name(s, MONSTER)}获得一次追击。`);
   }
   const ended = checkEnd(s);
+  recordCombatEvent(s, frame, actor, target, hit);
   b.optional = [];
   if (!ended && !hit && !d.cannot && !b.shock && gearCount(s, target, "c12"))
     b.optional.push({ id: target, card: "c12" });
@@ -733,7 +810,9 @@ function statusKeys(s, id, strong) {
   if (p?.movePenalty) keys.push("snare");
   if (p?.statuses?.some((entry) => entry.type === "slipped"))
     keys.push("slipped");
-  for (const card of p?.locked || []) keys.push(`lock-${card}`);
+  const curseLocks = s.battle.fighters[id].curseLocks || [];
+  for (const card of new Set([...(p?.locked || []), ...curseLocks]))
+    keys.push(`lock-${card}`);
   return keys;
 }
 
@@ -749,9 +828,14 @@ function cleanse(s, id, key) {
   else if (key === "snare") p.movePenalty = 0;
   else if (key === "slipped")
     p.statuses = p.statuses.filter((entry) => entry.type !== "slipped");
-  else if (key.startsWith("lock-"))
-    p.locked = p.locked.filter((card) => card !== key.slice(5));
-  else delete status(s, id)[key];
+  else if (key.startsWith("lock-")) {
+    const card = key.slice(5);
+    const f = s.battle.fighters[id];
+    if (p?.locked?.includes(card))
+      p.locked = p.locked.filter((g) => g !== card);
+    if (f.curseLocks?.includes(card))
+      f.curseLocks = f.curseLocks.filter((g) => g !== card);
+  } else delete status(s, id)[key];
 }
 
 function cleanseOptions(s, id, target, strong) {
@@ -858,9 +942,13 @@ function itemChoices(s, id) {
         }
         break;
       case "i13":
-        if (other !== MONSTER)
+        if (!b.monster)
           for (const g of new Set(player(s, other).gear)) {
-            if (g !== "l16" && !player(s, other).locked?.includes(g))
+            if (
+              g !== "l16" &&
+              !player(s, other).locked?.includes(g) &&
+              !b.fighters[other].curseLocks?.includes(g)
+            )
               choices.push(itemChoice(card, `锁定${cardName(g)}`, g));
           }
         break;
@@ -1016,7 +1104,7 @@ function useItem(s, id, card, arg, more, rng) {
       else removeEffect(s, arg);
       break;
     case "i13":
-      (player(s, other).locked ||= []).push(arg);
+      (b.fighters[other].curseLocks ??= []).push(arg);
       break;
     case "i14":
       cleanse(s, arg === "self" ? id : other, more);
@@ -1065,7 +1153,11 @@ function finishEquipment(s, apply) {
     let success = !roll.failed && roll.total >= 4;
     if (b.equipmentFlip) success = !success;
     if (success) changeHP(s, id, 1);
-    else if (card === "c12") applyDamage(s, id, 1);
+    else if (card === "c12") {
+      const frame = hp(s, id) === 1 ? combatFrame(s) : null;
+      applyDamage(s, id, 1);
+      if (frame && !hp(s, id)) recordCombatEvent(s, frame, null, id, true);
+    }
     log(
       s,
       `${name(s, id)}发动${cardName(card)}，判定 ${roll.total}，${success ? "成功" : "失败"}。`,
@@ -1086,9 +1178,11 @@ export function actBattle(s, id, actionId, rng = Math.random) {
     b.phase = b.surrenderFrom;
     delete b.surrenderFrom;
   } else if (verb === "confirmSurrender") {
+    const frame = combatFrame(s);
     player(s, id).hp = 0;
     log(s, `${name(s, id)}放弃战斗，按死亡结算。`);
     checkEnd(s);
+    recordCombatEvent(s, frame, null, null, false);
   } else if (verb === "repeatOpening") {
     b.fighters[id].openingUsed = true;
     b.spent = 0;

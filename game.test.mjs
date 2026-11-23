@@ -3,12 +3,16 @@ import test from "node:test";
 import { act, newGame, restoreGame, setOnline, view } from "./game.mjs";
 import { cards } from "./cards.mjs";
 
-const solo = () => newGame([{ id: "a", name: "甲" }]);
+const fixedLayout = () => 0.999999;
+const solo = () => newGame([{ id: "a", name: "甲" }], fixedLayout);
 const pair = () =>
-  newGame([
-    { id: "a", name: "甲" },
-    { id: "b", name: "乙" },
-  ]);
+  newGame(
+    [
+      { id: "a", name: "甲" },
+      { id: "b", name: "乙" },
+    ],
+    fixedLayout,
+  );
 const actor = (game) => view(game, game.turn).actor;
 const choose = (game, action, rng = () => 0) =>
   act(game, actor(game), action, rng);
@@ -24,6 +28,115 @@ function step(game, action, rng = () => 0) {
 const die = (n) => () => (n - 0.5) / 6;
 const ids = (g, id = actor(g)) => view(g, id).actions.map((a) => a.id);
 
+test("动作耗尽时自动交棒，但可使用的道具会保留手动结束选项", () => {
+  const g = pair();
+  g.phase = "rest";
+  step(g, "heal");
+  assert.equal(g.turn, "b");
+  assert.equal(g.phase, "move");
+  g.phase = "rest";
+  g.players[1].items = ["i10"];
+  step(g, "heal");
+  assert.equal(g.turn, "b");
+  assert.ok(ids(g).includes("end"));
+  step(g, "use:i10");
+  assert.equal(g.turn, "a");
+});
+
+test("同一个战斗格直接开战，沙漠先后退再确定交锋位置", () => {
+  const g = pair(),
+    [p, q] = g.players;
+  p.pos = 6;
+  q.pos = 7;
+  step(g, "roll", die(1));
+  assert.equal(g.phase, "battle");
+  assert.equal(g.battle.first, "b");
+  assert.equal(g.battle.second, "a");
+
+  const h = pair(),
+    [challenger, incumbent] = h.players;
+  challenger.pos = 29;
+  incumbent.pos = 29;
+  step(h, "roll", die(1));
+  assert.equal(h.phase, "skirmish");
+  assert.equal(challenger.pos, 29);
+  step(h, "clash", die(1));
+  step(h, "clash", die(6));
+  assert.equal(challenger.pos, 28);
+  assert.equal(h.board[27].type, "normal");
+  assert.equal(h.phase, "battle");
+});
+
+test("踩到沙漠香蕉皮原地结算，净化可用掉香蕉皮并继续原行程", () => {
+  const g = solo(),
+    [p] = g.players;
+  p.pos = 28;
+  g.board[28].banana = true;
+  step(g, "roll", die(4));
+  assert.equal(p.pos, 29);
+  assert.equal(g.phase, "offer");
+  assert.equal(g.board[28].banana, undefined);
+
+  const h = solo(),
+    [q] = h.players;
+  q.pos = 28;
+  q.items = ["i14"];
+  h.board[28].banana = true;
+  step(h, "roll", die(4));
+  assert.equal(q.pos, 29);
+  assert.ok(ids(h).includes("use:i14:banana"));
+  step(h, "use:i14:banana");
+  assert.equal(q.pos, 31);
+  assert.equal(h.phase, "offer");
+  assert.deepEqual(q.items, []);
+  assert.equal(h.board[28].banana, undefined);
+});
+
+test("火山受伤后交锋落败，本回合不会再次受火山伤害", () => {
+  const g = pair(),
+    [p, q] = g.players;
+  p.pos = 79;
+  q.pos = 81;
+  step(g, "roll", die(2));
+  assert.equal(p.hp, 9);
+  step(g, "clash", die(1));
+  step(g, "clash", die(6));
+  assert.equal(p.pos, 80);
+  assert.equal(p.hp, 9);
+  assert.equal(g.phase, "offer");
+});
+
+test("锁具咒只在当前 PvP 生效，决斗结束或中断后恢复装备", () => {
+  for (const disconnect of [false, true]) {
+    const g = pair();
+    const [challenger, incumbent] = g.players;
+    challenger.pos = 6;
+    challenger.hp = 2;
+    challenger.gear = ["c02"];
+    incumbent.pos = 7;
+    incumbent.atk = 8;
+    incumbent.gear = ["c10"];
+    incumbent.items = ["i13"];
+    step(g, "roll", die(1));
+    step(g, "use:i13:c02");
+    const gearState = () => view(g, "a").players[0].locked;
+    assert.deepEqual(gearState(), ["c02"]);
+    if (disconnect) setOnline(g, "b", false);
+    else
+      for (const action of [
+        "attack",
+        "confirmAttack",
+        "defend",
+        "confirm",
+        "confirm",
+      ])
+        choose(g, action, die(2));
+    assert.equal(g.battle, null);
+    assert.deepEqual(gearState(), []);
+    assert.deepEqual(challenger.gear, ["c02"]);
+  }
+});
+
 test("跨步符也须通过雨林判定，香蕉皮截停确认后的移动并结算落点", () => {
   const g = solo(),
     [p] = g.players;
@@ -34,7 +147,6 @@ test("跨步符也须通过雨林判定，香蕉皮截停确认后的移动并�
   choose(g, "check:accept");
   assert.equal(p.pos, 55);
   assert.deepEqual(p.items, ["i05"]);
-  step(g, "end");
   choose(g, "use:i05", die(3));
   assert.equal(p.pos, 55);
   choose(g, "check:accept");
@@ -63,7 +175,6 @@ test("雨林回城道具要过判定，成功回城没有升级", () => {
   step(g, "use:i11", die(1));
   assert.equal(p.pos, 57);
   assert.deepEqual(p.items, ["i11"]);
-  step(g, "end");
   step(g, "use:i11", die(6));
   assert.equal(p.pos, 1);
   assert.deepEqual(p.items, []);
@@ -78,7 +189,7 @@ test("休息格掷出 4 时既不升级也不回血", () => {
   choose(g, "rest", die(4));
   assert.equal(g.check.total, 4);
   choose(g, "check:accept");
-  assert.equal(g.phase, "end");
+  assert.equal(g.phase, "move");
   assert.equal(g.upgrades.length, 0);
   assert.equal(p.hp, 4);
 });
@@ -152,22 +263,24 @@ test("旧棋盘空格更新为功能格，未领取的精英和头目道具奖�
   assert.equal(p.act, 1);
   assert.equal(q.act, 1);
   step(g, "passOffer");
-  assert.equal(g.phase, "end");
+  assert.equal(g.turn, "a");
+  assert.equal(g.phase, "move");
 });
 
-test("沙漠同格先交锋，只由挑战者结算落点", () => {
+test("沙漠先处理后退，之后只有挑战者结算落点", () => {
   const g = pair(),
     [p, q] = g.players;
-  p.pos = 28;
+  p.pos = 29;
   q.pos = 30;
   step(g, "roll", die(2));
   assert.equal(g.phase, "skirmish");
   assert.deepEqual([p.pos, q.pos], [30, 30]);
   step(g, "clash", die(6));
   step(g, "clash", die(2));
-  assert.deepEqual([p.pos, q.pos], [29, 29]);
-  assert.equal(g.actor, p.id);
-  assert.equal(g.phase, "offer");
+  assert.deepEqual([p.pos, q.pos], [30, 29]);
+  assert.equal(g.turn, q.id);
+  assert.equal(g.actor, q.id);
+  assert.equal(g.phase, "move");
 });
 
 test("奇偶符只替换判定奇偶，移动仍使用原点数", () => {
@@ -186,6 +299,7 @@ test("挑战者交锋落败或被装备推开时，结算退到的格子", () =>
     [entrant, incumbent] = g.players;
   entrant.pos = 6;
   incumbent.pos = 7;
+  g.board[6].type = "rest";
   step(g, "roll", die(1));
   step(g, "clash", die(1));
   step(g, "clash", die(6));
@@ -263,6 +377,46 @@ test("the board has 100 positions, symmetric portals and 25 active tiles per ter
   assert.doesNotThrow(() => structuredClone(JSON.parse(JSON.stringify(g))));
 });
 
+test("新对局按地区洗牌，保留难度、双向传送门和存档地图", () => {
+  const roster = [{ id: "a", name: "甲" }];
+  const reference = solo();
+  const g = newGame(roster, generator(17));
+  const other = newGame(roster, generator(38));
+  assert.notDeepEqual(g.board, reference.board);
+  assert.notDeepEqual(g.board, other.board);
+  assert.equal(g.board[0].type, "start");
+  assert.equal(g.board[99].type, "finish");
+  assert.notEqual(g.matchId, other.matchId);
+  for (let i = 0; i < 100; i += 25) {
+    const kinds = (game) =>
+      game.board
+        .slice(i, i + 25)
+        .map((t) => t.type)
+        .sort();
+    assert.deepEqual(kinds(g), kinds(reference));
+  }
+  for (const tile of g.board.filter((t) => t.type === "portal")) {
+    assert.notEqual(tile.to, tile.pos);
+    assert.equal(g.board[tile.to - 1].to, tile.pos);
+  }
+  assert.deepEqual(restoreGame(structuredClone(g)).board, g.board);
+});
+
+test("雨林每回合只判定一次，掷骰后使用跨步符可接着移动", () => {
+  const g = solo(),
+    [p] = g.players;
+  p.pos = 51;
+  p.items = ["i05"];
+  step(g, "roll", die(3));
+  step(g, "roll", die(2));
+  assert.equal(p.pos, 53);
+  assert.equal(g.phase, "landing");
+  step(g, "use:i05");
+  assert.equal(p.pos, 54);
+  assert.equal(g.check, null);
+  assert.equal(g.phase, "battle");
+});
+
 test("宝箱独立分级，确认掷骰后才移动或抽装备", () => {
   for (const [position, roll, type, prefix] of [
     [5, 1, "chest", "c"],
@@ -290,7 +444,7 @@ test("宝箱独立分级，确认掷骰后才移动或抽装备", () => {
         ),
     );
     step(g, "passOffer");
-    assert.equal(g.phase, "end");
+    assert.equal(g.phase, "move");
     assert.deepEqual(p.gear, []);
     assert.ok(
       g.board
@@ -320,7 +474,7 @@ test("旧单人存档保留进度，并升级火山宝箱和宝箱待选装备",
   );
 });
 
-test("确认移动后记录沙漠的逐格前进与后退，火山传送到达也计伤害", () => {
+test("确认移动后记录沙漠的逐格前进与后退，火山传送不重复伤害", () => {
   const g = solo(),
     [p] = g.players;
   p.pos = 25;
@@ -343,7 +497,7 @@ test("确认移动后记录沙漠的逐格前进与后退，火山传送到达�
   q.pos = 89;
   step(h, "roll", die(1));
   assert.equal(q.pos, 76);
-  assert.equal(q.hp, 8);
+  assert.equal(q.hp, 9);
 });
 
 test("draws and unplayed items stay private and snapshots do not mutate authority", () => {
@@ -407,8 +561,7 @@ test("terrain, traps, portals, heals and rest upgrades resolve at their proper t
   q.pos = 55;
   step(h, "roll", die(2));
   assert.equal(q.pos, 55);
-  assert.equal(h.phase, "end");
-  step(h, "end");
+  assert.equal(h.phase, "move");
   step(h, "roll", die(3));
   assert.equal(h.phase, "move");
   step(h, "roll", die(3));
@@ -419,31 +572,26 @@ test("terrain, traps, portals, heals and rest upgrades resolve at their proper t
   step(h, "upgrade:def");
   assert.equal(q.def, 2);
   assert.equal(q.alloc.def, 1);
-  step(h, "end");
   q.pos = 79;
   q.hp = 5;
   step(h, "roll", die(1));
   assert.equal(q.hp, 4);
   step(h, "passOffer");
-  step(h, "end");
   q.pos = 79;
   q.gear.push("l10", "l11");
   step(h, "roll", die(1));
   assert.equal(q.hp, 5);
   step(h, "passOffer");
-  step(h, "end");
   q.pos = 32;
   step(h, "roll", die(2));
   assert.equal(q.pos, 15);
-  assert.equal(h.phase, "end");
-  step(h, "end");
+  assert.equal(h.phase, "move");
   q.pos = 1;
   h.board[1].banana = true;
   step(h, "roll", die(1));
   assert.equal(q.pos, 2);
   assert.equal(h.board[1].banana, undefined);
   step(h, "heal");
-  step(h, "end");
   step(h, "roll", die(6));
   assert.equal(q.pos, 8);
   assert.deepEqual(q.statuses, []);
@@ -493,7 +641,6 @@ test("barricades, ties in same-space clashes and duels at distant sites", () => 
   step(j, "loot:l07");
   assert.ok(d.gear.includes("l07"));
   assert.deepEqual(c.gear, ["l15"]);
-  step(j, "end");
   assert.equal(j.turn, "b");
   const k = pair();
   k.players[0].pos = 10;
@@ -517,7 +664,6 @@ test("monster damage persists on escape, resets on death and grants all tier rew
   step(g, "use:i04");
   assert.equal(g.board[18].hp, 2);
   assert.equal(g.upgrades.length, 0);
-  step(g, "end");
   p.pos = 18;
   step(g, "roll", die(1));
   assert.equal(g.battle.hp, 2);
@@ -557,7 +703,7 @@ test("monster damage persists on escape, resets on death and grants all tier rew
       assert.equal(offered().length, 3);
       assert.ok(offered().every((id) => cards[id].kind === "传说装备"));
       step(h, "passOffer");
-      assert.equal(h.phase, "end");
+      assert.equal(h.phase, "move");
       assert.equal(offered().length, 0);
       assert.deepEqual(q.items, []);
     } else {
@@ -604,16 +750,14 @@ test("equipment replacement, badge withdrawal, bag loss, parity conflict and ite
   assert.ok(p.items.includes("i18"));
 });
 
-test("returning to Start, legendary sacrifice, lock immunity, cleanses and redistribution", () => {
+test("returning to Start, legendary sacrifice, board cleanses and redistribution", () => {
   const g = pair(),
     [p, q] = g.players;
   q.gear = ["c01", "l16"];
   p.items = ["i13", "i15", "i17", "i06"];
   p.gear = ["l13"];
-  step(g, "use:i13");
-  assert.ok(!ids(g).some((id) => id.includes("l16")));
-  step(g, "target:1:c01");
-  assert.deepEqual(q.locked, ["c01"]);
+  assert.ok(!ids(g).includes("use:i13"));
+  assert.throws(() => choose(g, "use:i13"));
   step(g, "use:i17");
   step(g, "target:1");
   assert.equal(q.movePenalty, -2);
@@ -661,11 +805,9 @@ test("offline seats retain progress, skip turns and can act after reconnecting",
   assert.equal(g.turn, "b");
   step(g, "roll", die(2));
   assert.equal(q.pos, 15);
-  step(g, "end");
   assert.equal(g.turn, "b");
   setOnline(g, "a", true);
   step(g, "roll", die(5));
-  step(g, "end");
   assert.equal(g.turn, "a");
   setOnline(g, "b", false);
   assert.deepEqual(q.items, ["i04"]);
@@ -690,7 +832,7 @@ test("陷阱降低一项已升级属性，从原初之王逃跑要弃装备且�
   assert.deepEqual(ids(g), ["upgrade:atk"]);
   step(g, "upgrade:atk");
   assert.equal(p.atk, 1);
-  assert.equal(g.phase, "end");
+  assert.equal(g.phase, "move");
 
   p.pos = 100;
   p.gear = ["l03", "l02"];
@@ -704,7 +846,7 @@ test("陷阱降低一项已升级属性，从原初之王逃跑要弃装备且�
   assert.ok(ids(g).includes("discard:l03"));
   step(g, "discard:l03");
   assert.deepEqual(p.gear, ["l02"]);
-  assert.equal(g.phase, "end");
+  assert.equal(g.phase, "move");
 });
 
 test("悟技徽章进入传说宝箱，归途传承印存活返乡时也弃置", () => {
@@ -736,7 +878,6 @@ test("陷阱只降低永久升级，弃置悟技徽章才会移除徽章加成",
   p.atk = 2;
   p.alloc.atk = 1;
   p.pos = 20;
-  step(g, "end");
   step(g, "roll", die(1));
   assert.deepEqual(ids(g), ["upgrade:atk"]);
   step(g, "upgrade:atk");
@@ -758,10 +899,8 @@ test("a disconnected player can resume a private choice or a wounded monster", (
   setOnline(g, "a", true);
   step(g, "roll", die(1));
   step(g, "heal");
-  step(g, "end");
   assert.deepEqual(ids(g), choices);
   step(g, choices[0]);
-  step(g, "end");
   assert.equal(g.turn, "b");
   b.pos = 18;
   b.atk = 6;
@@ -776,7 +915,6 @@ test("a disconnected player can resume a private choice or a wounded monster", (
   step(g, "roll", die(1));
   if (g.phase === "landing") step(g, "resolve");
   step(g, "heal");
-  step(g, "end");
   assert.equal(g.battle.hp, 2);
   assert.equal(g.battle.actors[0], "b");
 });
@@ -861,6 +999,7 @@ for (const count of [1, 4]) {
           id: "p" + i,
           name: "玩家" + i,
         })),
+        generator(13244),
       );
       const rng = generator(13244);
       let actionsTaken = 0;

@@ -211,6 +211,103 @@ test("决斗攻击骰确认后才轮到对手，重掷播放新骰点", () => {
   assert.equal(s.players[1].hp, 9);
 });
 
+test("决斗仅在双方确认后记录攻击，并能记录反向攻击和未命中", () => {
+  const s = state(hero("甲", { items: ["i02"] }), hero("乙"));
+  startBattle(s, { attackerId: "甲", defenderId: "乙" });
+  choose(s, "attack", sixes);
+  choose(s, "confirmAttack");
+  choose(s, "defend");
+  choose(s, "confirm");
+  assert.equal(s.combatEvents?.length ?? 0, 0);
+  choose(s, "confirm");
+  play(s, "attack");
+  play(s, "defend", sixes);
+  assert.deepEqual(
+    s.combatEvents?.map(({ seq, attacker, defender, hit, fallen }) => [
+      seq,
+      attacker,
+      defender,
+      hit,
+      fallen,
+    ]),
+    [
+      [1, "甲", "乙", true, []],
+      [2, "乙", "甲", false, []],
+    ],
+  );
+  const { frame } = s.combatEvents[0];
+  assert.equal(frame.players.find((p) => p.id === "乙").hp, 10);
+  assert.equal(frame.battle.attackRoll.total, 6);
+  assert.equal(frame.battle.defenseRoll.total, 1);
+  assert.ok(!("items" in frame.players[0]));
+  assert.ok(!("gear" in frame.players[0]));
+});
+
+test("荆棘反击击败进攻方时会记录其倒下", () => {
+  const s = encounter("n01", { def: 2, gear: ["l05"] }, { monsterHp: 1 });
+  play(s, "attack");
+  assert.equal(play(s, "defend", sixes).type, "monsterWin");
+  const event = s.combatEvents?.at(-1);
+  assert.equal(event?.attacker, "$monster");
+  assert.equal(event?.defender, "甲");
+  assert.equal(event?.hit, false);
+  assert.deepEqual(event?.fallen, ["$monster"]);
+  assert.equal(event.frame.battle.hp, 1);
+});
+
+test("确认放弃才会记录骑士倒下", () => {
+  const s = encounter("n01");
+  choose(s, "surrender");
+  choose(s, "cancelSurrender");
+  assert.equal(s.combatEvents?.length ?? 0, 0);
+  choose(s, "surrender");
+  assert.equal(choose(s, "confirmSurrender").type, "monsterLoss");
+  const event = s.combatEvents?.at(-1);
+  assert.equal(event?.attacker, null);
+  assert.equal(event?.defender, null);
+  assert.deepEqual(event?.fallen, ["甲"]);
+  assert.equal(event.frame.players[0].hp, 10);
+});
+
+test("在史莱姆分裂后的装备选择阶段放弃时，只记录骑士倒下", () => {
+  const s = encounter("e03", { atk: 3, gear: ["l12"] }, { monsterHp: 1 });
+  play(s, "attack", die(2));
+  assert.equal(s.battle.phase, "optional");
+  choose(s, "surrender");
+  choose(s, "confirmSurrender");
+  assert.deepEqual(
+    s.combatEvents.map(({ fallen }) => fallen),
+    [["$monster"], ["甲"]],
+  );
+});
+
+test("赌命护腕导致骑士倒下时记录独立的受击事件", () => {
+  const s = encounter("n01", { hp: 1, def: 4, gear: ["c12"] });
+  play(s, "attack");
+  play(s, "defend");
+  assert.equal(play(s, "equipment").type, "monsterLoss");
+  const event = s.combatEvents.at(-1);
+  assert.equal(event.attacker, null);
+  assert.equal(event.defender, "甲");
+  assert.equal(event.hit, true);
+  assert.deepEqual(event.fallen, ["甲"]);
+  assert.equal(event.frame.players[0].hp, 1);
+});
+
+test("战斗动画只保留最近 24 项且换场后序号继续递增", () => {
+  const s = encounter("n01", { def: 4 });
+  for (let turn = 0; turn < 13; turn++) {
+    play(s, "attack");
+    play(s, "defend");
+  }
+  assert.equal(s.combatEvents?.length, 24);
+  assert.equal(s.combatEvents[0].seq, 3);
+  assert.equal(s.combatEvents.at(-1).seq, 26);
+  startBattle(s, { attackerId: "甲", monsterId: "n01" }, ones);
+  play(s, "attack");
+  assert.equal(s.combatEvents.at(-1).seq, 27);
+});
+
 test("攻击骰与防御骰作差，成功仅扣 1 生命；攻击次数等于行动点", () => {
   const s = encounter("e01", { atk: 9, act: 3 });
   play(s, "attack");
@@ -259,11 +356,17 @@ test("精英史莱姆须打倒两个分裂体，逃走后能原样恢复", () =>
   assert.equal(s.battle.form, "n01");
   assert.equal(s.battle.slimes, 2);
   assert.equal(s.battle.remaining, 4);
+  const split = s.combatEvents?.at(-1);
+  assert.deepEqual(split?.fallen, ["$monster"]);
+  assert.equal(split.frame.battle.form, "e03");
+  assert.equal(split.frame.battle.hp, 1);
   play(s, "attack");
   play(s, "attack");
   assert.equal(s.battle.slimes, 1);
   assert.equal(s.battle.remaining, 2);
   assert.equal(s.battle.hp, 2);
+  assert.deepEqual(s.combatEvents.at(-1).fallen, ["$monster"]);
+  assert.equal(s.combatEvents.at(-1).frame.battle.slimes, 2);
   const escaped = play(s, "use:i04");
   const next = encounter(
     "e03",
@@ -370,6 +473,12 @@ test("暴食按装备增幅、逐轮失去防御并于第十轮后引爆", () =>
   }
   assert.equal(outcome.type, "monsterWin");
   assert.equal(s.players[0].hp, 2);
+  const [strike, blast] = s.combatEvents?.slice(-2) ?? [];
+  assert.equal(strike?.attacker, "$monster");
+  assert.equal(blast?.attacker, null);
+  assert.equal(blast?.defender, "甲");
+  assert.deepEqual(blast?.fallen, ["$monster"]);
+  assert.equal(blast.frame.players[0].hp, 10);
 });
 
 test("色欲改为单骰成败，奇数攻击本轮仍可行动，下轮缴械并能以净化解除", () => {
@@ -409,6 +518,7 @@ test("玩家决斗擂主先攻，行动和反应均由对应玩家执行，击�
     winnerId: "擂主",
     loserId: "挑战者",
   });
+  assert.deepEqual(s.combatEvents.at(-1).fallen, ["挑战者"]);
 });
 
 test("借运骰和黄金骰作用于一次判定，重掷与砝码只改变自己的结果，命数棱镜可反转", () => {
@@ -492,7 +602,10 @@ test("骑士精神、锁具咒与破咒钉在决斗中可指定目标，百宝�
   startBattle(s, { attackerId: "甲", defenderId: "乙" });
   assert.ok(!choices(s).includes("use:i13:l16"));
   play(s, "use:i13:c02");
-  assert.deepEqual(s.players[1].locked, ["c02"]);
+  assert.deepEqual(s.players[1].locked, []);
+  assert.ok(
+    s.battle.statuses["乙"].some((status) => status.includes("装备封锁")),
+  );
   play(s, "use:i16");
   assert.equal(s.battle.remaining, 1);
   play(s, "use:i12:status:knight");
@@ -500,6 +613,37 @@ test("骑士精神、锁具咒与破咒钉在决斗中可指定目标，百宝�
   assert.equal(s.battle.attackRoll.count, 2);
   play(s, "defend");
   assert.equal(s.battle.last.defense, 5);
+});
+
+test("锁具咒只在决斗中使用，徽章属性可通过净化或下一场决斗恢复", () => {
+  for (const cleanse of ["use:i14:self:lock-c13", "use:i15:self", null]) {
+    const s = state(
+      hero("甲", { act: 2, items: ["i13", "i13"] }),
+      hero("乙", {
+        def: 2,
+        gear: ["c13"],
+        items: cleanse ? [cleanse.split(":")[1]] : [],
+        badgeStat: "def",
+        alloc: { atk: 0, def: 1, act: 0 },
+      }),
+    );
+    startBattle(s, { attackerId: "甲", defenderId: "乙" });
+    play(s, "use:i13:c13");
+    assert.ok(!choices(s).includes("use:i13:c13"));
+    play(s, "attack");
+    if (cleanse) play(s, cleanse);
+    play(s, "defend");
+    assert.equal(s.battle.last.defense, cleanse ? 2 : 1);
+    assert.equal(s.players[1].def, 2);
+    assert.deepEqual(s.players[1].alloc, { atk: 0, def: 1, act: 0 });
+    assert.deepEqual(s.players[1].locked, []);
+    startBattle(s, { attackerId: "甲", defenderId: "乙" });
+    play(s, "attack");
+    play(s, "defend");
+    assert.equal(s.battle.last.defense, 2);
+  }
+  const s = encounter("n01", { items: ["i13"] });
+  assert.ok(!choices(s).some((id) => id.startsWith("use:i13")));
 });
 
 test("致命一击后可发动圣杯，装备判定也支持选择骰点、借骰、重掷和反转", () => {
@@ -525,6 +669,8 @@ test("致命一击后可发动圣杯，装备判定也支持选择骰点、借�
   assert.deepEqual(s.battle.equipmentRoll.dice, [1, 1]);
   assert.equal(play(s, "use:i01").type, "monsterWin");
   assert.equal(s.players[0].hp, 9);
+  assert.equal(s.combatEvents?.length, 1);
+  assert.deepEqual(s.combatEvents[0].fallen, ["$monster"]);
 });
 
 test("放弃圣杯仍可在同轮随后一次造成伤害后发动", () => {

@@ -3,6 +3,7 @@ import {
   startBattle,
   battleActions,
   actBattle,
+  playerStats as battlePlayerStats,
   recordDice,
   refreshAttackAllowance,
   restoreBattleRules,
@@ -30,14 +31,16 @@ const capHP = (p, amount) => {
 const itemLimit = (p) => (equipped(p, "l16") ? Infinity : 5);
 const action = (id, label, card) =>
   card ? { id, label, card } : { id, label };
-const rulesVersion = 5;
+const rulesVersion = 6;
+const matchId = () =>
+  Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
 
 function log(game, message) {
   game.log.push(message);
   if (game.log.length > 120) game.log.splice(0, game.log.length - 120);
 }
 
-function board() {
+function board(rng) {
   const result = Array.from({ length: 100 }, (_, i) => {
     const biome = ["plain", "desert", "rainforest", "volcano"][
       Math.floor(i / 25)
@@ -75,7 +78,23 @@ function board() {
     result[a - 1].to = b;
     result[b - 1].to = a;
   }
-  return result;
+  if (!rng) return result;
+  const positions = result.map(({ pos }) => pos);
+  for (let start = 0; start < positions.length; start += 25) {
+    const first = Math.max(1, start);
+    const last = Math.min(98, start + 24);
+    for (let i = last; i > first; i--) {
+      const j = first + Math.floor(rng() * (i - first + 1));
+      [positions[i], positions[j]] = [positions[j], positions[i]];
+    }
+  }
+  const shuffled = [];
+  for (const tile of result) {
+    const pos = positions[tile.pos - 1];
+    const to = tile.to ? positions[tile.to - 1] : undefined;
+    shuffled[pos - 1] = { ...tile, pos, ...(to ? { to } : {}) };
+  }
+  return shuffled;
 }
 
 export function restoreGame(game, rng = Math.random) {
@@ -148,6 +167,31 @@ export function restoreGame(game, rng = Math.random) {
     for (const p of game.players)
       if (p.resume) migrateMonsterReward(game, p, p.resume, rng);
   }
+  if ((game.rulesVersion ?? 0) < 6) {
+    function migrateTurn(state, p) {
+      const saved = state.pending.back?.pending ?? state.pending;
+      state.turnTerrain = [];
+      if (saved.rainChecked) state.turnTerrain.push("rainforest");
+      if (saved.terrain === false)
+        state.turnTerrain.push(tileAt(game, p).terrain);
+    }
+    migrateTurn(game, player(game));
+    for (const p of game.players) {
+      if (p.resume) migrateTurn(p.resume, p);
+      if (p.locked.length) {
+        p.locked = [];
+        syncBadge(game, p);
+      }
+    }
+    if (game.phase === "itemTarget" && game.pending.id === "i13") goBack(game);
+    for (const p of game.players) {
+      const saved = p.resume;
+      if (saved?.phase !== "itemTarget" || saved.pending.id !== "i13") continue;
+      const { value, pending } = saved.pending.back;
+      saved.phase = value;
+      saved.pending = pending;
+    }
+  }
   const b = game.battle;
   if (b?.monster) {
     for (const roll of [b.attackRoll, b.defenseRoll]) {
@@ -178,10 +222,12 @@ export function restoreGame(game, rng = Math.random) {
     }
   }
   game.rulesVersion = rulesVersion;
+  game.matchId ??= matchId();
+  advanceIdleTurn(game, rng);
   return game;
 }
 
-export function newGame(roster) {
+export function newGame(roster, rng = Math.random) {
   if (
     !Array.isArray(roster) ||
     roster.length < 1 ||
@@ -216,12 +262,14 @@ export function newGame(roster) {
     players,
     upgrades: [],
     rulesVersion,
-    board: board(),
+    matchId: matchId(),
+    board: board(rng),
     turn,
     actor: turn,
     phase: "move",
     round: 1,
     sequence: 0,
+    turnTerrain: [],
     battle: null,
     pending: {},
     check: null,
@@ -238,7 +286,7 @@ function phase(game, value, pending = {}, actor = game.turn) {
   game.actor = actor;
 }
 
-function nextTurn(game) {
+function nextTurn(game, rng) {
   const index = game.players.findIndex((p) => p.id === game.turn);
   for (let step = 1; step <= game.players.length; step++) {
     const n = index + step;
@@ -250,6 +298,7 @@ function nextTurn(game) {
     delete next.resume;
     game.mods = resume?.mods || {};
     game.check = resume?.check || null;
+    game.turnTerrain = resume?.turnTerrain || [];
     phase(game, resume?.phase || "move", resume?.pending);
     if (game.check) showRoll(game, next);
     if (game.phase === "loot") {
@@ -266,8 +315,7 @@ function nextTurn(game) {
         phase(game, "battle");
         game.battle = saved.battle;
         game.dice = saved.dice;
-      } else if (tile.monster === saved.monster)
-        resolveSpace(game, next, Math.random);
+      } else if (tile.monster === saved.monster) resolveSpace(game, next, rng);
       else phase(game, "move");
     }
     return;
@@ -543,7 +591,7 @@ function resolveSpace(game, p, rng) {
     case "portal":
       relocate(game, p, tile.to);
       log(game, p.name + " 经传送门抵达第 " + p.pos + " 格。");
-      land(game, p, rng, true);
+      land(game, p, rng, { portal: true });
       return;
     case "rest":
       phase(game, "rest");
@@ -566,59 +614,58 @@ function afterEncounter(game, p, rng, portal, trapped = false) {
   else resolveSpace(game, p, rng);
 }
 
-function resolveArrival(
-  game,
-  p,
-  rng,
-  portal,
-  trapped,
-  terrain,
-  checkDisplacement = false,
-) {
+function moveForward(game, p, destination, rng, stepwise) {
+  const banana = game.board
+    .slice(p.pos, destination)
+    .find((tile) => tile.banana);
+  relocate(game, p, banana?.pos ?? destination, false, stepwise);
+  log(game, p.name + " 移动至第 " + p.pos + " 格。");
+  land(game, p, rng, { destination, stepwise });
+}
+
+function land(game, p, rng, arrival = {}) {
+  const tile = tileAt(game, p);
+  if (tile.banana) {
+    delete tile.banana;
+    log(game, p.name + " 踩到第 " + p.pos + " 格的香蕉皮。");
+    if (carried(p, "i14")) {
+      phase(game, "banana", arrival);
+      return;
+    }
+    arrival = { ...arrival, trapped: true };
+  }
+  resolveArrival(game, p, rng, arrival);
+}
+
+function resolveArrival(game, p, rng, { portal, trapped, skipClash } = {}) {
   const arrival = p.pos;
-  if (terrain && !applyArrival(game, p)) return;
-  if (checkDisplacement && p.pos !== arrival) {
-    land(game, p, rng, false, false, trapped);
+  if (!applyArrival(game, p, trapped)) return;
+  if (p.pos !== arrival) {
+    land(game, p, rng, { trapped, skipClash });
     return;
   }
   const tile = tileAt(game, p);
-  portal &&= p.pos === arrival;
-  const others = game.players.filter((q) => q.id !== p.id && q.online);
-  if (tile.type === "duel" && !equipped(p, "l08")) {
-    const champion = others
-      .filter((q) => tileAt(game, q).type === "duel" && !equipped(q, "l08"))
-      .sort((a, b) => a.arrived - b.arrived)[0];
-    if (champion) {
-      log(game, champion.name + " 为擂主，先攻击挑战者 " + p.name + "。");
-      startFight(game, { attackerId: champion.id, defenderId: p.id }, rng);
-      return;
-    }
+  const others = game.players
+    .filter((q) => q.id !== p.id && q.online)
+    .sort((a, b) => a.arrived - b.arrived);
+  const duelists =
+    tile.type === "duel" && !equipped(p, "l08")
+      ? others.filter(
+          (q) => tileAt(game, q).type === "duel" && !equipped(q, "l08"),
+        )
+      : [];
+  const sameSpaceDuel = duelists.find((q) => q.pos === p.pos);
+  if (sameSpaceDuel) {
+    startDuel(game, p, sameSpaceDuel, rng);
+    return;
   }
-  afterEncounter(game, p, rng, portal, trapped);
-}
-
-function land(
-  game,
-  p,
-  rng,
-  portal = false,
-  terrain = true,
-  alreadyTrapped = false,
-) {
-  const trapped = consumeBanana(game, p) || alreadyTrapped;
-  const others = game.players.filter((q) => q.id !== p.id && q.online);
   const opponent =
-    p.pos === 1
-      ? null
-      : others
-          .filter((q) => q.pos === p.pos)
-          .sort((a, b) => a.arrived - b.arrived)[0];
+    !skipClash && p.pos !== 1 && others.find((q) => q.pos === p.pos);
   if (opponent) {
     if (equipped(opponent, "c11")) {
       relocate(game, p, p.pos - 2);
       log(game, opponent.name + " 的逐客路障使 " + p.name + " 后退 2 格。");
-      const landedOnTrap = consumeBanana(game, p);
-      resolveArrival(game, p, rng, false, trapped || landedOnTrap, true);
+      land(game, p, rng, { trapped, skipClash: true });
     } else {
       phase(
         game,
@@ -628,30 +675,36 @@ function land(
           incumbent: opponent.id,
           portal,
           trapped,
-          terrain,
           first: null,
         },
         p.id,
       );
       log(game, p.name + " 与 " + opponent.name + " 同格交锋。");
     }
-  } else resolveArrival(game, p, rng, portal, trapped, terrain, true);
+  } else if (duelists.length) {
+    startDuel(game, p, duelists[0], rng);
+  } else afterEncounter(game, p, rng, portal, trapped);
 }
 
-function consumeBanana(game, p) {
-  const tile = tileAt(game, p);
-  if (!tile.banana) return false;
-  delete tile.banana;
-  log(game, p.name + " 踩到香蕉皮，停在第 " + p.pos + " 格。");
-  return true;
+function startDuel(game, challenger, champion, rng) {
+  log(game, champion.name + " 为擂主，先攻击挑战者 " + challenger.name + "。");
+  startFight(game, { attackerId: champion.id, defenderId: challenger.id }, rng);
 }
 
-function applyArrival(game, p) {
+function applyArrival(game, p, trapped) {
   const tile = tileAt(game, p);
+  if (
+    !["desert", "volcano"].includes(tile.terrain) ||
+    game.turnTerrain.includes(tile.terrain)
+  )
+    return true;
+  game.turnTerrain.push(tile.terrain);
   if (tile.terrain === "desert") {
-    relocate(game, p, p.pos - 1);
-    log(game, p.name + " 在沙漠后退至第 " + p.pos + " 格。");
-  } else if (tile.terrain === "volcano" && !equipped(p, "l10")) {
+    if (!trapped) {
+      relocate(game, p, p.pos - 1);
+      log(game, p.name + " 在沙漠后退至第 " + p.pos + " 格。");
+    }
+  } else if (!equipped(p, "l10")) {
     p.hp--;
     log(game, p.name + " 受到 1 点火山伤害。");
     if (p.hp <= 0) {
@@ -704,12 +757,12 @@ function finishRoll(game, p, rng) {
   game.mods = {};
   log(game, p.name + " 的" + rollNames[c.kind] + "判定为 " + c.total + "。");
   if (c.kind === "rain") {
+    game.turnTerrain.push("rainforest");
     if (c.total < 3) {
       log(game, p.name + " 雨林判定失败，无法移动。");
       if (game.phase === "landing") resolveSpace(game, p, rng);
       else phase(game, "end");
     } else {
-      game.pending.rainChecked = true;
       if (c.item) useItem(game, p, c.item, rng);
     }
   } else if (c.kind === "rest") {
@@ -734,15 +787,11 @@ function finishRoll(game, p, rng) {
       log(game, loser.name + " 交锋落败，后退 1 格。");
       const entrant = player(game, match.entrant);
       const displaced = loser === entrant;
-      const landedOnTrap = displaced && consumeBanana(game, entrant);
-      resolveArrival(
-        game,
-        entrant,
-        rng,
-        match.portal && !displaced,
-        match.trapped || landedOnTrap,
-        displaced || match.terrain !== false,
-      );
+      land(game, entrant, rng, {
+        portal: match.portal && !displaced,
+        trapped: match.trapped,
+        skipClash: true,
+      });
     }
   } else {
     p.movePenalty = 0;
@@ -751,10 +800,7 @@ function finishRoll(game, p, rng) {
       phase(game, "end");
     } else {
       const end = Math.min(100, p.pos + c.total);
-      const trap = game.board.slice(p.pos, end).find((tile) => tile.banana);
-      relocate(game, p, trap?.pos ?? end, false, true);
-      log(game, p.name + " 移动至第 " + p.pos + " 格。");
-      land(game, p, rng);
+      moveForward(game, p, end, rng, true);
     }
   }
 }
@@ -799,18 +845,6 @@ function targetOptions(game, p, id) {
   for (const [index, q] of game.players.entries()) {
     if (id === "i17")
       result.push(action("target:" + index, q.name + " · 移动判定 −2", id));
-    if (id === "i13" && q.id !== p.id) {
-      for (const card of q.gear)
-        if (card !== "l16" && !q.locked.includes(card)) {
-          result.push(
-            action(
-              "target:" + index + ":" + card,
-              q.name + " · " + nameOf(card),
-              card,
-            ),
-          );
-        }
-    }
     if (id === "i14" || id === "i15") {
       const available = statusOptions(q, id === "i15");
       if (id === "i15" && available.length)
@@ -851,14 +885,18 @@ function consume(game, p, id) {
 }
 
 function useItem(game, p, id, rng) {
-  if (["i13", "i14", "i15", "i17", "i18", "i19"].includes(id)) {
+  if (game.phase === "banana" && id === "i14") {
+    resolveBanana(game, p, rng, true);
+    return;
+  }
+  if (["i14", "i15", "i17", "i18", "i19"].includes(id)) {
     menu(game, "itemTarget", { id });
     return;
   }
   if (
     (id === "i05" || id === "i11") &&
     tileAt(game, p).terrain === "rainforest" &&
-    !game.pending.rainChecked
+    !game.turnTerrain.includes("rainforest")
   ) {
     rollCheck(game, p, "rain", rng, id);
     return;
@@ -873,9 +911,7 @@ function useItem(game, p, id, rng) {
       capHP(p, 2);
       break;
     case "i05":
-      relocate(game, p, p.pos + 1);
-      log(game, p.name + " 使用跨步符前进至第 " + p.pos + " 格。");
-      land(game, p, rng);
+      moveForward(game, p, p.pos + 1, rng, false);
       break;
     case "i06":
       grantUpgrade(
@@ -912,6 +948,19 @@ function useItem(game, p, id, rng) {
   }
 }
 
+function resolveBanana(game, p, rng, cleansed) {
+  const arrival = game.pending;
+  if (cleansed) {
+    consume(game, p, "i14");
+    log(game, p.name + " 净化了香蕉皮，继续移动。");
+    if (arrival.destination > p.pos) {
+      moveForward(game, p, arrival.destination, rng, arrival.stepwise);
+      return;
+    }
+  }
+  resolveArrival(game, p, rng, { ...arrival, trapped: !cleansed });
+}
+
 function applyTarget(game, p, parts) {
   const id = game.pending.id;
   const [, target, opt] = parts;
@@ -926,10 +975,7 @@ function applyTarget(game, p, parts) {
   } else {
     const q = game.players[Number(target)];
     if (id === "i17") q.movePenalty -= 2;
-    else if (id === "i13") {
-      q.locked.push(opt);
-      syncBadge(game, q);
-    } else if (id === "i14") removeStatus(game, q, opt);
+    else if (id === "i14") removeStatus(game, q, opt);
     else if (id === "i15") {
       q.statuses = [];
       q.movePenalty = 0;
@@ -957,7 +1003,7 @@ function boardItems(game, p) {
     if (id === "i06") return Object.values(p.alloc).some((n) => n > 0);
     if (id === "i10") return !tileAt(game, p).banana;
     if (id === "i11") return game.phase === "move" && p.pos > 1;
-    if (["i13", "i14", "i15", "i17"].includes(id))
+    if (["i14", "i15", "i17"].includes(id))
       return targetOptions(game, p, id).length > 0;
     return false;
   });
@@ -980,6 +1026,11 @@ function actions(game, id) {
       );
   }
   if (game.phase === "battle") return battleActions(game, id);
+  if (game.phase === "banana")
+    return [
+      action("use:i14:banana", "净化香蕉皮 · 继续移动", "i14"),
+      action("stopBanana", "停在当前格"),
+    ];
   let options;
   if (game.phase === "itemTarget")
     return [
@@ -992,7 +1043,8 @@ function actions(game, id) {
     switch (game.phase) {
       case "move": {
         const rain =
-          tileAt(game, p).terrain === "rainforest" && !game.pending.rainChecked;
+          tileAt(game, p).terrain === "rainforest" &&
+          !game.turnTerrain.includes("rainforest");
         options = [action("roll", rain ? "投掷雨林判定" : "投骰移动")];
         break;
       }
@@ -1062,6 +1114,20 @@ function actions(game, id) {
 }
 
 export function act(game, playerId, actionId, rng = Math.random) {
+  performAction(game, playerId, actionId, rng);
+  advanceIdleTurn(game, rng);
+}
+
+function advanceIdleTurn(game, rng) {
+  if (!game.players.some((p) => p.online)) return;
+  while (game.phase === "end" && !pendingUpgrade(game)) {
+    const p = player(game, game.actor);
+    if (p.online && boardItems(game, p).length) return;
+    nextTurn(game, rng);
+  }
+}
+
+function performAction(game, playerId, actionId, rng) {
   if (!actions(game, playerId).some((a) => a.id === actionId))
     throw new Error("当前无法执行这个行动");
   const p = player(game, playerId);
@@ -1084,7 +1150,6 @@ export function act(game, playerId, actionId, rng = Math.random) {
     const outcome = actBattle(game, playerId, actionId, rng);
     game.players.forEach((p) => syncBadge(game, p));
     settleBattle(game, outcome, rng);
-    if (game.phase === "end" && !player(game).online) nextTurn(game);
     if (game.log.length > 120) game.log.splice(0, game.log.length - 120);
     return;
   }
@@ -1095,7 +1160,8 @@ export function act(game, playerId, actionId, rng = Math.random) {
       rollCheck(
         game,
         p,
-        tileAt(game, p).terrain === "rainforest" && !game.pending.rainChecked
+        tileAt(game, p).terrain === "rainforest" &&
+          !game.turnTerrain.includes("rainforest")
           ? "rain"
           : "move",
         rng,
@@ -1108,7 +1174,10 @@ export function act(game, playerId, actionId, rng = Math.random) {
       rollCheck(game, p, "skirmish", rng);
       break;
     case "end":
-      nextTurn(game);
+      nextTurn(game, rng);
+      break;
+    case "stopBanana":
+      resolveBanana(game, p, rng, false);
       break;
     case "resolve":
       resolveSpace(game, p, rng);
@@ -1165,7 +1234,6 @@ export function act(game, playerId, actionId, rng = Math.random) {
       applyTarget(game, p, parts);
       break;
   }
-  if (game.phase === "end" && !player(game).online) nextTurn(game);
 }
 
 function interruptOffline(game) {
@@ -1209,14 +1277,8 @@ function interruptOffline(game) {
     } else if (!player(game, game.pending.incumbent).online) {
       game.check = null;
       game.mods = {};
-      resolveArrival(
-        game,
-        entrant,
-        Math.random,
-        game.pending.portal,
-        game.pending.trapped,
-        game.pending.terrain !== false,
-      );
+      const { portal, trapped } = game.pending;
+      land(game, entrant, Math.random, { portal, trapped, skipClash: true });
     }
   }
   const owner = player(game, game.actor);
@@ -1228,6 +1290,7 @@ function interruptOffline(game) {
         pending: game.pending,
         check: game.check,
         mods: game.mods,
+        turnTerrain: game.turnTerrain,
       };
     }
     game.check = null;
@@ -1236,7 +1299,7 @@ function interruptOffline(game) {
     if (player(game).online) return;
   }
   if (!player(game).online && game.phase !== "loot" && game.phase !== "replace")
-    nextTurn(game);
+    nextTurn(game, Math.random);
 }
 
 export function setOnline(game, id, online) {
@@ -1245,6 +1308,7 @@ export function setOnline(game, id, online) {
   p.online = Boolean(online);
   log(game, p.name + (p.online ? " 已重新连接。" : " 暂时离线。"));
   interruptOffline(game);
+  advanceIdleTurn(game, Math.random);
 }
 
 function describe(game, viewer) {
@@ -1274,6 +1338,7 @@ function describe(game, viewer) {
     move: "准备移动",
     end: "本回合的格子已结算",
     skirmish: "投骰进行同格交锋",
+    banana: "踩到香蕉皮 · 可以净化后继续移动",
     landing: "结算当前格，或使用跨步符前进",
     rest: "选择回复生命或掷骰争取升级",
     finish: "挑战原初之王，或返回起点并升级一次",
@@ -1297,6 +1362,8 @@ export function view(game, id) {
       "atk",
       "def",
       "actors",
+      "first",
+      "second",
       "effects",
       "actorId",
       "phase",
@@ -1318,6 +1385,9 @@ export function view(game, id) {
     battle = Object.fromEntries(
       fields.filter((k) => b[k] !== undefined).map((k) => [k, b[k]]),
     );
+    battle.combatants = Object.fromEntries(
+      b.actors.map((id) => [id, battlePlayerStats(game, id)]),
+    );
   }
   return structuredClone({
     players: game.players.map((p) => ({
@@ -1331,7 +1401,13 @@ export function view(game, id) {
       def: p.def,
       act: p.act,
       gear: p.gear,
-      locked: p.locked,
+      locked: [
+        ...new Set([
+          ...p.locked,
+          ...(b?.fighters[p.id]?.locked || []),
+          ...(b?.fighters[p.id]?.curseLocks || []),
+        ]),
+      ],
       statuses: p.statuses,
       movePenalty: p.movePenalty,
       equipCapacity: 3,
@@ -1340,6 +1416,8 @@ export function view(game, id) {
       ...(p.id === id ? { items: p.items } : {}),
     })),
     board: game.board.map(({ monsterState, encounter, ...tile }) => tile),
+    matchId: game.matchId,
+    combatEvents: game.combatEvents || [],
     turn: game.turn,
     actor: actorId(game),
     phase: pendingUpgrade(game) && !game.winner ? "upgrade" : game.phase,
