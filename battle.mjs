@@ -1,4 +1,4 @@
-import { cards, monsterProfile } from "./cards.mjs";
+import { badgeBonus, cards, monsterProfile } from "./cards.mjs";
 
 const MONSTER = "$monster";
 const COMBAT_EVENT_LIMIT = 24;
@@ -14,6 +14,11 @@ const COMBAT_FRAME_FIELDS = [
   "phase",
   "round",
   "slimes",
+  "enemies",
+  "targetIndex",
+  "attackingEnemy",
+  "enemyAttackQueue",
+  "enemyAttackCount",
   "shield",
   "attackRoll",
   "defenseRoll",
@@ -38,6 +43,22 @@ const statusNames = {
   def: "临时防御",
   act: "临时行动",
 };
+const buffs = new Set([
+  "oil",
+  "extra",
+  "golden",
+  "growth",
+  "rage",
+  "atk",
+  "def",
+  "act",
+]);
+const itemStages = {
+  i12: "effect",
+  i13: "equipment",
+  i14: "effect",
+  i15: "target",
+};
 const pick = (rng, length) => Math.min(length - 1, Math.floor(rng() * length));
 function log(s, message) {
   s.log.push(message);
@@ -51,6 +72,79 @@ const rival = (b, id) => (id === b.first ? b.second : b.first);
 const hp = (s, id) => (id === MONSTER ? s.battle.hp : player(s, id).hp);
 const status = (s, id) => s.battle.fighters[id].status;
 const cardName = (id) => cards[id]?.name || id;
+const newFighter = () => ({
+  status: {},
+  locked: [],
+  curseLocks: [],
+  turns: 0,
+  survived: false,
+  chalice: 0,
+});
+const activeEnemy = (b) => b.enemies?.[b.targetIndex];
+const displayFighter = (b, id) =>
+  id === MONSTER ? activeEnemy(b)?.id || id : id;
+const livingEnemies = (b) =>
+  b.enemies.flatMap((enemy, index) => (enemy.hp > 0 ? [index] : []));
+
+function selectEnemy(b, index) {
+  // The original monster fields track whichever lane is taking part in this strike.
+  const previous = activeEnemy(b);
+  if (previous) {
+    previous.hp = b.hp;
+    b.enemyFighters[b.targetIndex] = b.fighters[MONSTER];
+  }
+  b.targetIndex = index;
+  const enemy = activeEnemy(b);
+  b.fighters[MONSTER] = b.enemyFighters[index];
+  b.hp = enemy.hp;
+  b.maxHp = enemy.maxHp;
+  b.attackingEnemy = b.side === MONSTER ? index : null;
+}
+
+export function restoreEnemyLanes(s, saved) {
+  const b = s.battle;
+  if (!b) return;
+  if (b.enemies) {
+    b.enemyFighters ??= b.enemies.map(newFighter);
+    b.enemyFighters[b.targetIndex] = b.fighters[MONSTER];
+    b.enemyAttackQueue ??=
+      b.side === MONSTER
+        ? livingEnemies(b).filter((i) => i >= b.targetIndex)
+        : [];
+    b.enemyAttackCount ??= b.enemyAttackQueue.length;
+    return;
+  }
+  if (b.monster !== "n04" && !(b.monster === "e03" && b.slimes)) return;
+  const health = b.slimes === 1 ? [0, b.hp] : [b.hp, b.maxHp];
+  const focus = health[0] > 0 ? 0 : 1;
+  b.enemies = health.map((hp, index) => ({
+    id: `${MONSTER}:${index}`,
+    form: b.form,
+    hp: saved?.[index]?.hp ?? hp,
+    maxHp: b.maxHp,
+    atk: b.base.atk,
+    def: b.base.def,
+  }));
+  b.enemyFighters = [newFighter(), newFighter()];
+  b.enemyFighters[focus] = b.fighters[MONSTER];
+  const living = b.enemies.findIndex((e) => e.hp > 0);
+  selectEnemy(b, living < 0 ? focus : living);
+  if (!b.nextSlime)
+    for (const roll of [b.attackRoll, b.defenseRoll])
+      if (roll?.id === MONSTER) roll.id = displayFighter(b, MONSTER);
+  b.enemyAttackQueue = b.side === MONSTER ? livingEnemies(b) : [];
+  b.enemyAttackCount = b.enemyAttackQueue.length;
+  if (b.slimes) b.slimes = b.enemies.filter((e) => e.hp > 0).length;
+}
+
+export function battleMonsterState(b) {
+  return {
+    hp: b.hp,
+    form: b.form,
+    slimes: b.slimes,
+    ...(b.enemies && { enemies: b.enemies.map((enemy) => ({ ...enemy })) }),
+  };
+}
 
 function gearCount(s, id, card) {
   if (id === MONSTER || status(s, id).gearSeal) return 0;
@@ -66,9 +160,14 @@ function gearCount(s, id, card) {
 }
 
 function changeHP(s, id, delta) {
-  if (id === MONSTER)
-    s.battle.hp = Math.min(s.battle.maxHp, Math.max(0, s.battle.hp + delta));
-  else {
+  if (id === MONSTER) {
+    const b = s.battle;
+    b.hp = Math.min(b.maxHp, Math.max(0, b.hp + delta));
+    const enemy = activeEnemy(b);
+    if (enemy) enemy.hp = b.hp;
+    if (b.monster === "e03" && b.enemies)
+      b.slimes = b.enemies.filter((e) => e.hp > 0).length;
+  } else {
     const p = player(s, id);
     p.hp = Math.min(10, Math.max(0, p.hp + delta));
   }
@@ -140,10 +239,11 @@ export function playerStats(s, id) {
     !s.battle.monster && p.badgeStat && !gearCount(s, id, "c13")
       ? p.badgeStat
       : null;
-  const act = p.act + (v.act || 0) - Number(disabledBadge === "act");
-  let atk = p.atk - Number(disabledBadge === "atk");
-  let def = p.def - Number(disabledBadge === "def");
-  if (gearCount(s, id, "l14")) atk = def = act;
+  const act =
+    p.act + (v.act || 0) - badgeBonus * Number(disabledBadge === "act");
+  const seal = gearCount(s, id, "l14") * Math.floor(act / 5);
+  let atk = p.atk - badgeBonus * Number(disabledBadge === "atk") + seal;
+  let def = p.def - badgeBonus * Number(disabledBadge === "def") + seal;
   atk += (v.atk || 0) + (p.hp >= 6 ? gearCount(s, id, "l07") : 0);
   def += (v.def || 0) + (p.hp <= 5 ? gearCount(s, id, "l07") : 0);
   if (effect(s, "b04.1")) [atk, def] = [def, atk];
@@ -198,19 +298,50 @@ function monsterDisplay(s) {
   };
 }
 
-function displayedStatuses(s) {
+function displayedStatusEntries(s) {
+  const b = s.battle;
+  const ids = b.enemies
+    ? [...b.actors, ...b.enemies.map((enemy) => enemy.id)]
+    : [b.first, b.second];
   return Object.fromEntries(
-    Object.keys(s.battle.fighters).map((id) => [
+    ids.map((id) => [
       id,
-      statusKeys(s, id, true).map((key) => battleText(s, statusName(key))),
+      statusKeys(s, id).map((key) => ({
+        id: key,
+        label: battleText(s, statusName(key)),
+        type: buffs.has(key) ? "buff" : "debuff",
+      })),
     ]),
   );
+}
+
+function displayEffects(s, target) {
+  target.effectEntries = s.battle.active.map((key) => ({
+    id: key,
+    label: effectText(s, key),
+  }));
+  target.effects = target.effectEntries.map((entry) => entry.label);
+  target.statusEntries = displayedStatusEntries(s);
+  target.statuses = Object.fromEntries(
+    Object.entries(target.statusEntries).map(([id, entries]) => [
+      id,
+      entries.map((entry) => entry.label),
+    ]),
+  );
+  const b = s.battle;
+  const phase = b.phase === "surrenderConfirm" ? b.surrenderFrom : b.phase;
+  target.strikeResult =
+    phase === "reaction" && b.attackRoll && b.defenseRoll
+      ? strikeResult(checkStrikes(s).hit)
+      : (b.strikeResult ?? null);
 }
 
 export function refreshBattleStats(s) {
   const b = s.battle;
   if (b.monster) Object.assign(b, monsterDisplay(s));
-  b.effects = b.active.map((key) => effectText(s, key));
+  const enemy = activeEnemy(b);
+  if (enemy) Object.assign(enemy, { hp: b.hp, atk: b.atk, def: b.def });
+  displayEffects(s, b);
   b.detail =
     b.phase === "done"
       ? "战斗已结束"
@@ -225,7 +356,6 @@ export function refreshBattleStats(s) {
           openingFollowup: "先声双刃 · 再行动一次，或转入防御",
           surrenderConfirm: "确认放弃将按死亡结算，返回起点",
         }[b.phase] || "战斗结算中";
-  b.statuses = displayedStatuses(s);
 }
 
 function combatFrame(s) {
@@ -238,8 +368,7 @@ function combatFrame(s) {
     ]),
   );
   if (b.monster) Object.assign(battle, monsterDisplay(s));
-  battle.effects = b.active.map((key) => effectText(s, key));
-  battle.statuses = displayedStatuses(s);
+  displayEffects(s, battle);
   return structuredClone({
     battle,
     players: b.actors.map((id) => {
@@ -249,19 +378,29 @@ function combatFrame(s) {
   });
 }
 
+function recordBattleEffect(s, card, kind, target, changes) {
+  s.battleEffectSequence = (s.battleEffectSequence ?? 0) + 1;
+  const events = (s.battleEffectEvents ??= []);
+  events.push({ seq: s.battleEffectSequence, card, kind, target, changes });
+  if (events.length > COMBAT_EVENT_LIMIT) events.shift();
+}
+
 function recordCombatEvent(s, frame, attacker, defender, hit) {
   const fallen = frame.players
     .filter(({ id, hp: before }) => before > 0 && hp(s, id) <= 0)
     .map(({ id }) => id);
   const b = s.battle;
-  const split = b.nextSlime && b.slimes !== frame.battle.slimes;
-  if (frame.battle.hp > 0 && (b.hp <= 0 || split)) fallen.push(MONSTER);
+  const beforeEnemy = activeEnemy(frame.battle);
+  if (beforeEnemy?.hp > 0 && b.enemies[frame.battle.targetIndex].hp <= 0)
+    fallen.push(beforeEnemy.id);
+  else if (!beforeEnemy && frame.battle.hp > 0 && (b.hp <= 0 || b.nextSlime))
+    fallen.push(MONSTER);
   s.combatSequence = (s.combatSequence ?? 0) + 1;
   const events = (s.combatEvents ??= []);
   events.push({
     seq: s.combatSequence,
-    attacker,
-    defender,
+    attacker: displayFighter(frame.battle, attacker),
+    defender: displayFighter(frame.battle, defender),
     hit,
     fallen,
     frame,
@@ -298,15 +437,7 @@ export function startBattle(
     defenseRoll: null,
     effects: [],
   });
-  for (const id of [b.first, b.second])
-    b.fighters[id] = {
-      status: {},
-      locked: [],
-      curseLocks: [],
-      turns: 0,
-      survived: false,
-      chalice: 0,
-    };
+  for (const id of [b.first, b.second]) b.fighters[id] = newFighter();
   if (monsterId) {
     const card = monsterProfile(form, biome);
     const p = playerStats(s, attackerId);
@@ -321,6 +452,7 @@ export function startBattle(
     if (b.active.length && gearCount(s, attackerId, "l01")) b.phase = "binding";
     if (effect(s, "b02.1")) status(s, b.first).envy = 2;
     if (effect(s, "b02.3")) status(s, b.first).gearSeal = true;
+    restoreEnemyLanes(s, monsterState?.enemies);
   }
   log(
     s,
@@ -345,7 +477,10 @@ export function restoreBattleRules(s, biome) {
   refreshBattleStats(s);
   for (const roll of [b.attackRoll, b.defenseRoll, b.equipmentRoll]) {
     if (!roll || roll.cannot) continue;
-    if (roll.id === MONSTER) {
+    if (
+      roll.id === MONSTER ||
+      b.enemies?.some((enemy) => enemy.id === roll.id)
+    ) {
       roll.total = b[roll.type];
       continue;
     }
@@ -446,20 +581,17 @@ function checkEnd(s) {
       monsterHp: null,
     });
   else if (b.hp <= 0) {
-    if (effect(s, "e03.1") || b.slimes > 1) {
-      b.slimes = b.slimes ? b.slimes - 1 : 2;
+    if (effect(s, "e03.1")) {
+      b.slimes = 2;
       b.form = "n01";
       b.base = { atk: cards.n01.atk, def: cards.n01.def };
       b.active = [];
       b.maxHp = b.hp = cards.n01.hp;
+      b.fighters[MONSTER] = newFighter();
       b.nextSlime = true;
-      log(
-        s,
-        b.slimes === 2
-          ? "两只史莱姆分裂登场，先攻击左边。"
-          : "左边的史莱姆已击败，接下来攻击右边。",
-      );
-    } else
+      restoreEnemyLanes(s);
+      log(s, "两只史莱姆分裂登场，先攻击左边。");
+    } else if (!b.enemies?.some((enemy) => enemy.hp > 0))
       setOutcome(s, {
         ...common,
         type: b.monster === "final" ? "victory" : "monsterWin",
@@ -474,7 +606,24 @@ function endTurn(s) {
   const b = s.battle,
     f = b.fighters[b.side];
   if (f.status.stun <= f.turns) delete f.status.stun;
+  if (b.side === MONSTER && b.enemies) {
+    b.enemyAttackQueue.shift();
+    const index = b.enemyAttackQueue[0];
+    if (index !== undefined) {
+      selectEnemy(b, index);
+      const next = b.fighters[MONSTER];
+      if (next.status.disarm <= next.turns) delete next.status.disarm;
+      beginTurn(s);
+      return;
+    }
+  }
   b.side = rival(b, b.side);
+  if (b.enemies) {
+    const living = livingEnemies(b);
+    b.enemyAttackQueue = b.side === MONSTER ? living : [];
+    b.enemyAttackCount = b.enemyAttackQueue.length;
+    selectEnemy(b, living[0]);
+  }
   // The player remains disarmed during the opponent's response to the skipped turn.
   const next = b.fighters[b.side];
   if (next.status.disarm <= next.turns) delete next.status.disarm;
@@ -503,11 +652,14 @@ function adjusted(s, id, dice, type) {
   let mod = gearCount(s, id, "c03");
   if (type === "atk" || type === "def") {
     mod -= (v.envy || 0) + (s.battle.monster ? 0 : 2 * gearCount(s, id, "l09"));
-    const offset = 3 * (gearCount(s, id, "c04") - gearCount(s, id, "c05"));
+    const spear = gearCount(s, id, "c04");
+    const tower = gearCount(s, id, "c05");
     mod +=
       type === "atk"
-        ? 2 * gearCount(s, id, "c01") + offset - (v.sloth || 0)
-        : 2 * gearCount(s, id, "c02") + 3 * gearCount(s, id, "l05") - offset;
+        ? 2 * gearCount(s, id, "c01") + 3 * (spear - tower) - (v.sloth || 0)
+        : 2 * gearCount(s, id, "c02") +
+          3 * (gearCount(s, id, "l05") + tower) -
+          2 * spear;
   }
   return value + mod;
 }
@@ -567,7 +719,7 @@ function rollFor(s, id, type, rng) {
   const cannot = type === "def" && !!status(s, id).stun;
   if (id === MONSTER) {
     return {
-      id,
+      id: displayFighter(s.battle, id),
       type,
       dice: [],
       total: cannot ? 0 : monsterStats(s)[type],
@@ -584,6 +736,7 @@ function attackRoll(s, rng) {
   const b = s.battle;
   b.attackRoll = rollFor(s, b.side, "atk", rng);
   b.defenseRoll = null;
+  b.strikeResult = null;
   b.actorId = b.monster ? rival(b, b.side) : b.side;
   b.phase = b.monster ? "defend" : "attackReview";
   b.flip = false;
@@ -634,12 +787,14 @@ export function battleDiceReview(s) {
   const b = s.battle;
   const phase = b.phase === "surrenderConfirm" ? b.surrenderFrom : b.phase;
   let result = null;
-  if (phase === "reaction") result = checkStrikes(s).hit ? "命中" : "未命中";
+  if (phase === "reaction") result = strikeResult(checkStrikes(s).hit);
   else if (phase === "equipmentCheck")
     result = equipmentSuccess(b) ? "成功" : "失败";
   else if (phase !== "attackReview") return null;
   return { key: "battle:" + phase + ":" + b.actorId, result };
 }
+
+const strikeResult = (hit) => (hit ? "成功攻击" : "成功防御");
 
 function resolveStrike(s) {
   const b = s.battle,
@@ -684,7 +839,7 @@ function resolveStrike(s) {
   delete av.oil;
   log(
     s,
-    `${name(s, actor)}攻击 ${a.total} 对 ${name(s, target)}防御 ${d.total}，${hit ? `命中，造成 ${damage} 点伤害` : "未造成伤害"}。`,
+    `${name(s, actor)}攻击 ${a.total} 对 ${name(s, target)}防御 ${d.total}，${strikeResult(hit)}${hit ? `，造成 ${damage} 点伤害` : ""}。`,
   );
   if (
     target === MONSTER &&
@@ -711,8 +866,8 @@ function resolveStrike(s) {
       dv.sloth = (dv.sloth || 0) + thornDamage;
   }
   b.last = {
-    attacker: actor,
-    defender: target,
+    attacker: displayFighter(b, actor),
+    defender: displayFighter(b, target),
     attack: a.total,
     defense: d.total,
     margin,
@@ -720,6 +875,7 @@ function resolveStrike(s) {
     damage,
   };
   b.lastDice = { attack: a.dice, defense: d.dice };
+  b.strikeResult = strikeResult(hit);
   b.spent++;
   b.remaining--;
   if (actor === MONSTER && hit && effect(s, "b01.2")) {
@@ -765,10 +921,14 @@ function afterStrike(s) {
   }
   if (b.nextSlime) {
     delete b.nextSlime;
-    b.fighters[MONSTER].status = {};
-    b.fighters[MONSTER].turns = 0;
     b.attackRoll = b.defenseRoll = null;
+    b.strikeResult = null;
   }
+  if (b.side === b.first && b.enemies && b.hp <= 0)
+    selectEnemy(
+      b,
+      b.enemies.findIndex((enemy) => enemy.hp > 0),
+    );
   if (b.remaining > 0) {
     b.phase = "attack";
     b.actorId = b.side;
@@ -809,13 +969,19 @@ const itemChoice = (card, suffix = "", parameter = "") =>
     card,
   );
 
-function statusKeys(s, id, strong) {
+function battleFighter(b, id) {
+  const index = b.enemies?.findIndex((enemy) => enemy.id === id) ?? -1;
+  if (index < 0) return b.fighters[id];
+  return index === b.targetIndex ? b.fighters[MONSTER] : b.enemyFighters[index];
+}
+
+function statusKeys(s, id) {
   const p = player(s, id);
-  const f = s.battle.fighters[id];
+  const f = battleFighter(s.battle, id);
   const keys = Object.keys(f.status).filter(
-    (k) => k in statusNames && f.status[k] && (strong || k !== "stun"),
+    (k) => k in statusNames && f.status[k],
   );
-  if (strong && f.golden) keys.push("golden");
+  if (f.golden) keys.push("golden");
   if (p?.movePenalty) keys.push("snare");
   if (p?.statuses?.some((entry) => entry.type === "slipped"))
     keys.push("slipped");
@@ -833,31 +999,120 @@ function statusName(key) {
 
 function cleanse(s, id, key) {
   const p = player(s, id);
+  const f = battleFighter(s.battle, id);
   if (key === "gearSeal") removeEffect(s, "b02.3");
-  else if (key === "golden") delete s.battle.fighters[id].golden;
+  else if (key === "golden") delete f.golden;
   else if (key === "snare") p.movePenalty = 0;
   else if (key === "slipped")
     p.statuses = p.statuses.filter((entry) => entry.type !== "slipped");
   else if (key.startsWith("lock-")) {
     const card = key.slice(5);
-    const f = s.battle.fighters[id];
     if (p?.locked?.includes(card))
       p.locked = p.locked.filter((g) => g !== card);
     if (f.curseLocks?.includes(card))
       f.curseLocks = f.curseLocks.filter((g) => g !== card);
-  } else delete status(s, id)[key];
+  } else delete f.status[key];
 }
 
-function cleanseOptions(s, target) {
-  return statusKeys(s, target, true).filter((key) => key !== "erosion");
+function cleanseOptions(s, target, type) {
+  return statusKeys(s, target).filter(
+    (key) =>
+      key !== "erosion" && (!type || buffs.has(key) === (type === "buff")),
+  );
 }
 
-function cleanseTarget(s, id, side) {
-  const target = side === "self" ? id : rival(s.battle, id);
-  const label = side === "self" ? "自己" : name(s, target);
-  const keys = cleanseOptions(s, target);
-  const detail = keys.map((key) => battleText(s, statusName(key)));
-  return { side, target: label, keys, detail };
+function effectTargets(s, id) {
+  const b = s.battle;
+  const self = { side: "self", target: "自己", targetId: id };
+  if (b.enemies)
+    return [
+      self,
+      ...b.enemies.flatMap((enemy, index) =>
+        enemy.hp > 0
+          ? [
+              {
+                side: `enemy${index}`,
+                target: `${cards[enemy.form].name}（${index === 0 ? "左" : "右"}）`,
+                targetId: enemy.id,
+              },
+            ]
+          : [],
+      ),
+    ];
+  const targetId = rival(b, id);
+  return [self, { side: "other", target: name(s, targetId), targetId }];
+}
+
+function itemEffectChoices(s, id, card) {
+  const b = s.battle;
+  const other = rival(b, id);
+  if (card === "i12")
+    return b.monster
+      ? b.active.map((key) => ({
+          ...itemChoice(card, effectText(s, key), key),
+          target: name(s, MONSTER),
+          targetId: displayFighter(b, MONSTER),
+          effectKey: key,
+          source: "monster",
+          detail: [effectText(s, key)],
+        }))
+      : [];
+  if (card === "i13")
+    return b.monster
+      ? []
+      : [...new Set(player(s, other).gear)]
+          .filter(
+            (key) =>
+              key !== "l16" &&
+              !player(s, other).locked?.includes(key) &&
+              !b.fighters[other].curseLocks?.includes(key),
+          )
+          .map((key) => ({
+            ...itemChoice(card, cardName(key), key),
+            target: name(s, other),
+            targetId: other,
+            effectKey: key,
+            source: "gear",
+            detail: [cardName(key)],
+          }));
+  const choices = [];
+  for (const { side, target, targetId } of effectTargets(s, id)) {
+    if (card === "i15") {
+      for (const [effectType, label] of [
+        ["buff", "增益"],
+        ["debuff", "减益"],
+      ]) {
+        const keys = cleanseOptions(s, targetId, effectType);
+        if (!keys.length) continue;
+        choices.push({
+          ...itemChoice(
+            card,
+            `${target} · 全部${label}`,
+            `${side}:${effectType}`,
+          ),
+          target,
+          targetId,
+          effectType,
+          source: "status",
+          detail: keys.map((key) => battleText(s, statusName(key))),
+        });
+      }
+    } else {
+      for (const key of cleanseOptions(s, targetId)) {
+        const label = battleText(s, statusName(key));
+        choices.push({
+          ...itemChoice(card, `${target} · ${label}`, `${side}:${key}`),
+          target,
+          targetId,
+          effectKey: key,
+          source: "status",
+          detail: [label],
+          effectType: buffs.has(key) ? "buff" : "debuff",
+        });
+      }
+    }
+  }
+  return choices;
 }
 
 function itemMenuChoices(s, id) {
@@ -865,23 +1120,11 @@ function itemMenuChoices(s, id) {
   const cancel = action("cancelItem", "取消");
   if (stage === "confirm")
     return [
-      action("confirmCleanse", `确认净化${target}`, card),
+      action("confirmItem", `确认 · ${cardName(card)} · ${target}`, card),
       action("backItem", "重新选择目标"),
       cancel,
     ];
-  const choices = [];
-  for (const side of ["self", "other"]) {
-    const { target, keys, detail } = cleanseTarget(s, id, side);
-    if (!keys.length) continue;
-    if (card === "i15") choices.push(itemChoice(card, `选择${target}`, side));
-    else
-      keys.forEach((key, index) =>
-        choices.push(
-          itemChoice(card, `${target} · ${detail[index]}`, `${side}:${key}`),
-        ),
-      );
-  }
-  return [...choices, cancel];
+  return [...itemEffectChoices(s, id, card), cancel];
 }
 
 function updateRemaining(s) {
@@ -914,7 +1157,7 @@ function reactionChoices(s, id) {
         !effect(s, "b07.1")))
   )
     choices.push(
-      itemChoice("i01", equipment ? "反转装备判定" : "反转命中结果"),
+      itemChoice("i01", equipment ? "反转装备判定" : "反转攻防结果"),
     );
   if (roll.cannot || (!equipment && b.side !== id && b.shock)) return choices;
   if (!b.monster && b.side === id && b.phase === "reaction") return choices;
@@ -940,7 +1183,6 @@ function reactionChoices(s, id) {
 function itemChoices(s, id) {
   const b = s.battle,
     p = player(s, id),
-    other = rival(b, id),
     choices = [];
   for (const card of new Set(p.items)) {
     switch (card) {
@@ -948,7 +1190,7 @@ function itemChoices(s, id) {
         if (p.hp < 10) choices.push(itemChoice(card, "回复 2 点生命"));
         break;
       case "i03":
-        if (b.phase === "attack")
+        if (b.phase === "attack" && b.remaining > 0 && !cantAttack(s, id))
           choices.push(itemChoice(card, "下次攻击伤害 +1"));
         break;
       case "i04":
@@ -968,37 +1210,12 @@ function itemChoices(s, id) {
           choices.push(itemChoice(card, "本次多掷一枚骰子"));
         break;
       case "i12":
-        if (other === MONSTER)
-          for (const key of b.active)
-            choices.push(itemChoice(card, effectText(s, key), key));
-        else {
-          for (const key of statusKeys(s, other, false))
-            choices.push(
-              itemChoice(card, `移除${statusName(key)}`, `status:${key}`),
-            );
-          for (const g of new Set(player(s, other).gear))
-            if (gearCount(s, other, g))
-              choices.push(
-                itemChoice(card, `本场封印${cardName(g)}`, `gear:${g}`),
-              );
-        }
-        break;
       case "i13":
-        if (!b.monster)
-          for (const g of new Set(player(s, other).gear)) {
-            if (
-              g !== "l16" &&
-              !player(s, other).locked?.includes(g) &&
-              !b.fighters[other].curseLocks?.includes(g)
-            )
-              choices.push(itemChoice(card, `锁定${cardName(g)}`, g));
-          }
-        break;
       case "i14":
       case "i15":
-        if (cleanseOptions(s, id).length || cleanseOptions(s, other).length)
+        if (itemEffectChoices(s, id, card).length)
           choices.push({
-            ...itemChoice(card, "选择要净化的状态"),
+            ...itemChoice(card, "选择目标"),
             opensItemMenu: true,
           });
         break;
@@ -1039,9 +1256,12 @@ function battlePhaseActions(s, id) {
       ...itemChoices(s, id).filter((a) => a.card === "i06"),
     ];
   if (b.phase === "binding")
-    return b.active.map((key) =>
-      action(`bind:${key}`, `封印 · ${effectText(s, key)}`, "l01"),
-    );
+    return b.active.map((key) => ({
+      ...action(`bind:${key}`, `封印 · ${effectText(s, key)}`, "l01"),
+      targetId: displayFighter(b, MONSTER),
+      effectKey: key,
+      source: "monster",
+    }));
   if (b.phase === "optional") {
     const diceItems = itemChoices(s, id).filter(
       (a) => a.card === "i09" || a.card === "i18",
@@ -1069,7 +1289,7 @@ function battlePhaseActions(s, id) {
   if (b.phase === "reaction") {
     const { hit } = checkStrikes(s);
     return [
-      action("confirm", `确认判定 · 当前${hit ? "命中" : "未命中"}`),
+      action("confirm", `确认判定 · ${strikeResult(hit)}`),
       ...reactionChoices(s, id),
     ];
   }
@@ -1085,7 +1305,37 @@ function battlePhaseActions(s, id) {
   return [main, ...itemChoices(s, id)];
 }
 
-function useItem(s, id, card, arg, more, rng) {
+function applyItemEffect(s, card, selected) {
+  const { targetId, effectKey, effectType } = selected;
+  if (card === "i12") {
+    const label = effectText(s, effectKey);
+    removeEffect(s, effectKey);
+    recordBattleEffect(s, card, "disable", targetId, [
+      { id: effectKey, label },
+    ]);
+  } else if (card === "i13") {
+    (battleFighter(s.battle, targetId).curseLocks ??= []).push(effectKey);
+    recordBattleEffect(s, card, "lock", targetId, [
+      { id: effectKey, label: cardName(effectKey) },
+    ]);
+  } else {
+    const keys =
+      card === "i14" ? [effectKey] : cleanseOptions(s, targetId, effectType);
+    for (const key of keys) cleanse(s, targetId, key);
+    recordBattleEffect(
+      s,
+      card,
+      "cleanse",
+      targetId,
+      keys.map((key) => ({
+        id: key,
+        label: battleText(s, statusName(key)),
+      })),
+    );
+  }
+}
+
+function useItem(s, id, card, arg, rng, selected) {
   const b = s.battle,
     p = player(s, id),
     f = b.fighters[id],
@@ -1117,7 +1367,7 @@ function useItem(s, id, card, arg, more, rng) {
         playerId: id,
         monsterId: b.monster,
         monsterHp: b.hp,
-        monsterState: { hp: b.hp, form: b.form, slimes: b.slimes },
+        monsterState: battleMonsterState(b),
       });
       break;
     case "i06":
@@ -1139,21 +1389,11 @@ function useItem(s, id, card, arg, more, rng) {
       v.extra = (v.extra || 0) + 1;
       break;
     case "i12":
-      if (arg === "gear") b.fighters[other].locked.push(more);
-      else if (arg === "status") cleanse(s, other, more);
-      else removeEffect(s, arg);
-      break;
     case "i13":
-      (b.fighters[other].curseLocks ??= []).push(arg);
-      break;
     case "i14":
-      cleanse(s, arg === "self" ? id : other, more);
+    case "i15":
+      applyItemEffect(s, card, selected);
       break;
-    case "i15": {
-      const target = arg === "self" ? id : other;
-      for (const k of cleanseOptions(s, target)) cleanse(s, target, k);
-      break;
-    }
     case "i16":
       status(s, id).knight = status(s, other).knight = 1;
       break;
@@ -1212,9 +1452,9 @@ function finishEquipment(s, apply) {
 
 export function actBattle(s, id, actionId, rng = Math.random) {
   const b = s.battle;
-  if (!battleActions(s, id).some((a) => a.id === actionId))
-    throw new Error("当前无法执行此战斗行动。");
-  const [verb, card, arg, more] = actionId.split(":");
+  const chosen = battleActions(s, id).find((a) => a.id === actionId);
+  if (!chosen) throw new Error("当前无法执行此战斗行动。");
+  const [verb, card, arg] = actionId.split(":");
   if (verb === "surrender") {
     b.surrenderFrom = b.phase;
     b.phase = "surrenderConfirm";
@@ -1235,23 +1475,40 @@ export function actBattle(s, id, actionId, rng = Math.random) {
   } else if (verb === "cancelItem") {
     delete b.itemMenu;
   } else if (verb === "backItem") {
-    b.itemMenu = { card: b.itemMenu.card, stage: "target" };
-  } else if (verb === "confirmCleanse") {
-    const { card, side } = b.itemMenu;
+    const { card } = b.itemMenu;
+    b.itemMenu = { card, stage: itemStages[card] };
+  } else if (verb === "confirmItem") {
+    const { card, selection } = b.itemMenu;
+    const selected = itemEffectChoices(s, id, card).find(
+      (a) => a.id === selection,
+    );
+    if (!selected) throw new Error("当前无法执行此战斗行动。");
     delete b.itemMenu;
-    useItem(s, id, card, side, undefined, rng);
+    useItem(s, id, card, undefined, rng, selected);
   } else if (verb === "use") {
-    if (!arg && (card === "i14" || card === "i15"))
-      b.itemMenu = { card, stage: card === "i14" ? "status" : "target" };
-    else if (card === "i15") {
-      const { side, target, detail } = cleanseTarget(s, id, arg);
-      b.itemMenu = { card, stage: "confirm", side, target, detail };
-    } else {
-      if (card === "i14") delete b.itemMenu;
-      useItem(s, id, card, arg, more, rng);
+    if (!itemStages[card]) useItem(s, id, card, arg, rng);
+    else if (!arg) b.itemMenu = { card, stage: itemStages[card] };
+    else {
+      const { target, targetId, effectKey, effectType, detail, source } =
+        chosen;
+      b.itemMenu = {
+        card,
+        stage: "confirm",
+        selection: actionId,
+        target,
+        targetId,
+        effectKey,
+        effectType,
+        detail,
+        source,
+      };
     }
   } else if (verb === "bind") {
+    const label = effectText(s, card);
     removeEffect(s, card);
+    recordBattleEffect(s, "l01", "disable", chosen.targetId, [
+      { id: card, label },
+    ]);
     beginTurn(s);
   } else if (verb === "attack") attackRoll(s, rng);
   else if (verb === "confirmAttack") {

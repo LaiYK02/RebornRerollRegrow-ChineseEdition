@@ -5,6 +5,7 @@ import {
   icon,
   art,
   cardEffects,
+  textLines,
   palette,
   regions,
   tiles,
@@ -61,6 +62,7 @@ let room = null,
 let snapshot = "",
   noticeTimer,
   combatSequence = 0,
+  battleEffectSequence = 0,
   playback = null,
   shownWinner = null,
   diceAnimation = null,
@@ -251,7 +253,7 @@ function detail(id, back = false, confirm = null) {
       '<div class="card-effects">' +
       cardEffects(c) +
       "</div>" +
-      (c.quote ? '<p class="quote">' + esc(c.quote) + "</p>" : "") +
+      (c.quote ? '<p class="quote">' + textLines(c.quote) + "</p>" : "") +
       "</div>" +
       (confirm
         ? '<div class="card-confirmation">' +
@@ -537,6 +539,8 @@ function renderRoom(displayGame = room?.game, combatResolving = false) {
     $(".exit-dock")?.setAttribute("inert", "");
     $(".reward-panel")?.setAttribute("inert", "");
   }
+  zoomMovementPreview();
+  diceAnimation?.position();
   for (const id of openPanels) {
     const panel = document.getElementById(id);
     if (panel) panel.open = true;
@@ -588,7 +592,9 @@ function cancelPlayback() {
   reviewedDice = null;
   handSelection = null;
   combatSequence = 0;
+  battleEffectSequence = 0;
   shownWinner = null;
+  app.classList.remove("moving-board");
 }
 function controlsLocked() {
   return !!playback;
@@ -631,13 +637,22 @@ function setRoom(next) {
     next.game &&
     old.game.matchId === next.game.matchId;
   const events = next.game?.combatEvents || [];
+  const effectEvents = next.game?.battleEffectEvents || [];
   if (!sameGame) {
     cancelPlayback();
     combatSequence = events.at(-1)?.seq ?? 0;
+    battleEffectSequence = effectEvents.at(-1)?.seq ?? 0;
     if (next.game) travel();
   }
   const strikes = events.filter((event) => event.seq > combatSequence);
   combatSequence = Math.max(combatSequence, events.at(-1)?.seq ?? 0);
+  const effects = effectEvents.filter(
+    (event) => event.seq > battleEffectSequence,
+  );
+  battleEffectSequence = Math.max(
+    battleEffectSequence,
+    effectEvents.at(-1)?.seq ?? 0,
+  );
   const moves =
     sameGame && next.game.movementSequence > old.game.movementSequence
       ? next.game.movements
@@ -660,6 +675,9 @@ function setRoom(next) {
     if (strike.frame?.battle)
       visualQueue.push({ strike, game: next.game, log: old.game.log });
   }
+  for (const effect of effects) {
+    if (next.game.battle) visualQueue.push({ effect, game: next.game });
+  }
   if (moves.length && !reduced) visualQueue.push({ game: next.game, moves });
   const alreadyPlaying = controlsLocked();
   if (alreadyPlaying) {
@@ -676,7 +694,7 @@ function setRoom(next) {
     renderDiceReview();
   }
   scheduleTurnReminder(next);
-  if (strikes.length || alreadyPlaying) return;
+  if (strikes.length || effects.length || alreadyPlaying) return;
   if (
     next.game &&
     old?.game &&
@@ -762,16 +780,23 @@ async function playVisuals() {
         diceAnimation?.close();
         await animateStrike(job, signal);
         focusDice = false;
+      } else if (job.effect) {
+        diceAnimation?.close();
+        await animateBattleEffect(job, signal);
+        focusDice = false;
       } else {
         diceAnimation?.close();
+        app.classList.add("moving-board");
         renderRoom(job.game);
         await cameraMove(job.game, job.moves, signal);
+        if (playback === controller) app.classList.remove("moving-board");
         focusDice = false;
       }
     }
   } finally {
     if (playback === controller) {
       playback = null;
+      app.classList.remove("moving-board");
       renderLiveRoom();
       renderDiceReview();
       if (
@@ -833,7 +858,24 @@ function createDicePanel(dice, rolling = false) {
     pageNumber.textContent = page + 1 + " / " + pageCount();
     show();
   }
+  function position() {
+    const anchor = $(".actions") || $(".hand-dock") || $(".stage");
+    if (!anchor) return;
+    const { left, top, width } = anchor.getBoundingClientRect();
+    const { width: panelWidth, height } = panel.getBoundingClientRect();
+    const margin = 8;
+    const center = Math.max(
+      panelWidth / 2 + margin,
+      Math.min(innerWidth - panelWidth / 2 - margin, left + width / 2),
+    );
+    panel.style.left = center + "px";
+    panel.style.top =
+      Math.max(margin, Math.min(top, innerHeight) - height - margin) + "px";
+  }
   function fit() {
+    const anchor = $(".actions") || $(".hand-dock");
+    const rect = anchor?.getBoundingClientRect();
+    const space = rect ? Math.min(rect.top, innerHeight) : innerHeight;
     const {
       columns,
       size,
@@ -841,7 +883,10 @@ function createDicePanel(dice, rolling = false) {
     } = diceLayout(
       dice.values.length,
       Math.max(1, Math.floor(innerWidth * 0.94) - 40),
-      Math.max(1, Math.floor(innerHeight * 0.49)),
+      Math.max(
+        18,
+        Math.min(Math.floor(innerHeight * 0.49), Math.floor(space - 66)),
+      ),
     );
     page = Math.min(
       Math.floor((page * pageSize) / capacity),
@@ -851,21 +896,25 @@ function createDicePanel(dice, rolling = false) {
     faces.style.setProperty("--die-size", size + "px");
     faces.style.inlineSize = columns * size + "px";
     drawPage();
+    position();
   }
   previous.onclick = () => {
     page--;
     drawPage();
+    position();
   };
   next.onclick = () => {
     page++;
     drawPage();
+    position();
   };
-  fit();
   describe();
   panel.classList.toggle("revealed", revealed);
   app.classList.toggle("rolling-dice", rolling);
   document.body.append(panel);
+  fit();
   window.addEventListener("resize", fit);
+  window.addEventListener("scroll", fit, { passive: true });
   const tumbling = rolling
     ? setInterval(() => {
         tick++;
@@ -880,6 +929,7 @@ function createDicePanel(dice, rolling = false) {
       describe();
       panel.classList.add("revealed");
       app.classList.remove("rolling-dice");
+      position();
     },
     update(nextDice) {
       const newRoll = dice.rollId !== nextDice.rollId;
@@ -888,10 +938,13 @@ function createDicePanel(dice, rolling = false) {
       dice = nextDice;
       fit();
       describe();
+      position();
     },
+    position: fit,
     close() {
       clearInterval(tumbling);
       window.removeEventListener("resize", fit);
+      window.removeEventListener("scroll", fit);
       panel.remove();
       app.classList.remove("rolling-dice");
       diceAnimation = null;
@@ -986,7 +1039,10 @@ async function animateStrike({ strike, game: next, log }, signal) {
       layer,
       "combat-result " + reaction,
       contact,
-      icon(hit ? "sword" : "shield") + "<b>" + (hit ? "命中" : "格挡") + "</b>",
+      icon(hit ? "sword" : "shield") +
+        "<b>" +
+        (hit ? "成功攻击" : "成功防御") +
+        "</b>",
     );
     tone(hit ? 155 : 535);
     if (!reduced && hit) navigator.vibrate?.(45);
@@ -1033,6 +1089,82 @@ async function animateStrike({ strike, game: next, log }, signal) {
   await pauseVisual(reduced ? 620 : 950, signal);
 }
 
+async function animateBattleEffect({ effect, game: next }, signal) {
+  renderRoom(next, true);
+  const { kind, target, changes } = effect;
+  const labels = { lock: "装备封锁", disable: "效果封印", cleanse: "状态净化" };
+  const layer = $(".combat-effects");
+  const fighter =
+    $('[data-combatant="' + CSS.escape(target) + '"]') ||
+    (target === "$monster" ? $(".enemy-line") : null);
+  const sidebar = $(".passives");
+  const focus = fighter || sidebar;
+  const rect = focus.getBoundingClientRect();
+  const area = layer.getBoundingClientRect();
+  if (kind === "lock") {
+    for (const { id } of changes) {
+      $(
+        '[data-player="' +
+          CSS.escape(target) +
+          '"] [data-gear-slot="' +
+          CSS.escape(id) +
+          '"]',
+      )?.classList.add("gear-effect-locked");
+    }
+  }
+  focus.classList.add("combat-effect-" + kind);
+  sidebar.classList.add("effect-sidebar-pulse");
+  const result = effectAt(
+    layer,
+    "combat-result status-result status-" + kind,
+    {
+      x: rect.left + rect.width / 2 - area.left,
+      y: rect.top + rect.height / 2 - area.top,
+    },
+    icon(kind === "lock" ? "lock" : kind === "cleanse" ? "plus" : "key") +
+      "<b>" +
+      labels[kind] +
+      "</b><small>" +
+      changes.map((change) => textLines(change.label)).join("、") +
+      "</small>",
+  );
+  result.setAttribute("role", "status");
+  tone(kind === "cleanse" ? 665 : 260);
+  await pauseVisual(reduced ? 680 : 1120, signal);
+}
+
+function zoomMovementPreview() {
+  const world = $(".stage > .board[data-movement-preview]");
+  if (!world) return;
+  const tiles = [...world.querySelectorAll("[data-preview]")];
+  if (!tiles.length) return;
+  const left = Math.min(...tiles.map((tile) => tile.offsetLeft));
+  const top = Math.min(...tiles.map((tile) => tile.offsetTop));
+  const right = Math.max(
+    ...tiles.map((tile) => tile.offsetLeft + tile.offsetWidth),
+  );
+  const bottom = Math.max(
+    ...tiles.map((tile) => tile.offsetTop + tile.offsetHeight),
+  );
+  const width = world.clientWidth;
+  const height = world.clientHeight;
+  const scale = Math.max(
+    1,
+    Math.min(2.35, width / (right - left + 16), height / (bottom - top + 16)),
+  );
+  const x = Math.min(
+    0,
+    Math.max(width * (1 - scale), width / 2 - ((left + right) * scale) / 2),
+  );
+  const y = Math.min(
+    0,
+    Math.max(height * (1 - scale), height / 2 - ((top + bottom) * scale) / 2),
+  );
+  world.style.transform =
+    "translate(" + x + "px," + y + "px) scale(" + scale + ")";
+}
+window.addEventListener("resize", zoomMovementPreview);
+
 async function cameraMove(g, moves, signal) {
   const stage = $(".stage");
   if (!stage) return;
@@ -1040,7 +1172,11 @@ async function cameraMove(g, moves, signal) {
     ...p,
     pos: moves.find(({ id }) => id === p.id)?.from ?? p.pos,
   }));
-  stage.innerHTML = board({ ...g, players: drawPlayers });
+  stage.innerHTML = board({
+    ...g,
+    players: drawPlayers,
+    movementPreview: null,
+  });
   const world = stage.firstElementChild;
   function aim(pos) {
     const cell = world.querySelector('[data-tile="' + pos + '"]');
@@ -1244,7 +1380,10 @@ async function click(e) {
         detail(card);
       } else if (options.length === 1 && options[0].opensItemMenu) {
         await submitAction(options[0].id);
-        $(".actions [data-action]")?.focus({ preventScroll: true });
+        (
+          $(".equipment-targets [data-action], .passives [data-action]") ||
+          $(".actions [data-action]")
+        )?.focus({ preventScroll: true });
       } else {
         handSelection = handSelection?.index === index ? null : { card, index };
         renderRoom();
@@ -1301,7 +1440,12 @@ async function click(e) {
       return;
     }
     if (d.action) {
+      const targetChoice = b.closest(".equipment-targets, .passives");
       await submitAction(d.action);
+      if (targetChoice)
+        $(".actions [data-action='confirmItem']")?.focus({
+          preventScroll: true,
+        });
       return;
     }
     const k = d.do;

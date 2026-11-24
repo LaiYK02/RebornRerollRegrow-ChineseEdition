@@ -4,6 +4,7 @@ import {
   startBattle,
   actBattle,
   battleActions,
+  playerStats,
   refreshAttackAllowance,
 } from "./battle.mjs";
 
@@ -48,11 +49,114 @@ function play(s, id, rng = ones) {
 }
 const choices = (s) => battleActions(s, s.battle.actorId).map((a) => a.id);
 
+test("三相战印每五行动给攻击和防御各加一点，长矛只减二防御", () => {
+  const s = state(
+    hero("甲", { atk: 3, def: 4, act: 11, gear: ["l14"] }),
+    hero("乙", { gear: ["c04"] }),
+  );
+  startBattle(s, { attackerId: "甲", defenderId: "乙" });
+  assert.deepEqual(playerStats(s, "甲"), { atk: 5, def: 6, act: 11 });
+  play(s, "attack");
+  play(s, "defend", die(3));
+  assert.equal(s.battle.last.defense, 1);
+});
+
+test("两只哥布林各自受伤并依次攻击，逃跑重遇保留两份生命", () => {
+  const s = encounter("n04", { atk: 4, items: ["i04"] });
+  assert.deepEqual(
+    s.battle.enemies?.map((e) => e.hp),
+    [2, 2],
+  );
+  play(s, "attack");
+  assert.deepEqual(
+    s.battle.enemies.map((e) => e.hp),
+    [1, 2],
+  );
+  assert.equal(s.battle.attackingEnemy, 0);
+  assert.deepEqual(s.battle.enemyAttackQueue, [0, 1]);
+  play(s, "defend");
+  assert.equal(s.battle.attackingEnemy, 1);
+  assert.deepEqual(s.battle.enemyAttackQueue, [1]);
+  play(s, "defend");
+  assert.equal(s.battle.round, 2);
+  assert.equal(s.players[0].hp, 8);
+  assert.deepEqual(
+    s.combatEvents.slice(-2).map((e) => e.attacker),
+    ["$monster:0", "$monster:1"],
+  );
+  const escaped = play(s, "use:i04");
+  const resumed = encounter(
+    "n04",
+    { atk: 4 },
+    { monsterState: escaped.monsterState },
+  );
+  assert.deepEqual(
+    resumed.battle.enemies.map((e) => e.hp),
+    [1, 2],
+  );
+  play(resumed, "attack");
+  assert.deepEqual(
+    resumed.battle.enemies.map((e) => e.hp),
+    [0, 2],
+  );
+  assert.equal(resumed.battle.attackingEnemy, 1);
+  assert.deepEqual(resumed.combatEvents.at(-1).fallen, ["$monster:0"]);
+});
+
+test("分裂史莱姆加入同一攻击轮并各自等待防御确认", () => {
+  const s = encounter("e03", { atk: 5 }, { monsterHp: 1 });
+  play(s, "attack");
+  assert.equal(s.battle.attackingEnemy, 0);
+  assert.equal(s.battle.enemyAttackCount, 2);
+  assert.equal(s.battle.attackRoll.id, "$monster:0");
+  choose(s, "defend");
+  assert.equal(s.battle.attackingEnemy, 0);
+  assert.equal(s.battle.strikeResult, "成功攻击");
+  choose(s, "confirm");
+  assert.equal(s.battle.attackingEnemy, 1);
+  assert.equal(s.battle.attackRoll.id, "$monster:1");
+  assert.equal(s.battle.round, 1);
+  play(s, "defend", sixes);
+  assert.equal(s.battle.strikeResult, "成功防御");
+  assert.equal(s.battle.round, 2);
+  assert.equal(s.players[0].hp, 9);
+});
+
+test("一只哥布林晕眩时仅跳过该哥布林的攻击", () => {
+  const s = encounter("n04", { atk: 2, gear: ["l06"] });
+  choose(s, "attack");
+  play(s, "shock");
+  assert.deepEqual(
+    s.battle.enemies.map((enemy) => enemy.hp),
+    [1, 2],
+  );
+  assert.deepEqual(s.battle.enemyAttackQueue, [1]);
+  assert.equal(s.battle.attackRoll.id, "$monster:1");
+  play(s, "defend");
+  assert.equal(s.players[0].hp, 9);
+  assert.equal(s.battle.round, 2);
+});
+
+test("只有能发起攻击时才可使用淬刃油", () => {
+  const s = state(
+    hero("甲", { items: ["i03"] }),
+    hero("乙", { items: ["i03"] }),
+  );
+  startBattle(s, { attackerId: "甲", defenderId: "乙" });
+  assert.ok(choices(s).includes("use:i03"));
+  play(s, "use:i03");
+  play(s, "attack", sixes);
+  assert.ok(!choices(s).includes("use:i03"));
+  play(s, "defend");
+  assert.equal(s.battle.last.damage, 2);
+  assert.ok(choices(s).includes("use:i03"));
+});
+
 function playCleanse(s, target) {
   const [, card] = target.split(":");
   choose(s, `use:${card}`);
   play(s, target);
-  if (card === "i15") play(s, "confirmCleanse");
+  return play(s, "confirmItem");
 }
 
 test("先声双刃让 3 行动点的玩家在首轮再攻击 3 次", () => {
@@ -159,21 +263,32 @@ test("净化可以解除嫉妒装备诅咒，但暴食衰减只能移除对应�
   assert.equal(s.battle.last.attack, 4);
   const t = encounter("b06", { items: ["i14", "i15", "i12"] });
   assert.ok(!choices(t).some((id) => id === "use:i14" || id === "use:i15"));
-  play(t, "use:i12:b06.1");
+  choose(t, "use:i12");
+  choose(t, "use:i12:b06.1");
+  assert.ok(t.battle.active.includes("b06.1"));
+  assert.deepEqual(t.players[0].items, ["i14", "i15", "i12"]);
+  choose(t, "confirmItem");
+  assert.equal(t.battleEffectEvents.at(-1).kind, "disable");
+  assert.equal(t.battleEffectEvents.at(-1).changes[0].id, "b06.1");
   assert.equal(t.battle.def, t.battle.base.def);
 });
 
 test("净化可选双方的增减益，大净化显示预览且取消不耗牌", () => {
   const s = state(
     hero("甲", { items: ["i13", "i16", "i14", "i15"] }),
-    hero("乙", { gear: ["c01"] }),
+    hero("乙", { gear: ["c01"], items: ["i07"] }),
   );
   startBattle(s, { attackerId: "甲", defenderId: "乙" });
-  play(s, "use:i13:c01");
+  playCleanse(s, "use:i13:c01");
   play(s, "use:i16");
+  play(s, "attack");
+  play(s, "use:i07:def");
+  play(s, "defend");
+  play(s, "attack");
+  play(s, "defend");
   assert.throws(() => choose(s, "use:i14:other:lock-c01"));
   choose(s, "use:i14");
-  assert.equal(s.battle.itemMenu?.stage, "status");
+  assert.equal(s.battle.itemMenu?.stage, "effect");
   assert.ok(choices(s).includes("use:i14:self:knight"));
   assert.ok(choices(s).includes("use:i14:other:knight"));
   assert.ok(choices(s).includes("use:i14:other:lock-c01"));
@@ -181,18 +296,27 @@ test("净化可选双方的增减益，大净化显示预览且取消不耗牌",
   choose(s, "cancelItem");
   assert.deepEqual(s.players[0].items, ["i14", "i15"]);
   choose(s, "use:i15");
-  choose(s, "use:i15:other");
+  assert.ok(choices(s).includes("use:i15:other:buff"));
+  choose(s, "use:i15:other:debuff");
   assert.equal(s.battle.itemMenu.stage, "confirm");
   assert.equal(s.battle.itemMenu.target, "乙");
-  assert.deepEqual(s.battle.itemMenu.detail, s.battle.statuses["乙"]);
+  assert.deepEqual(s.battle.itemMenu.detail, [
+    "骑士精神",
+    "装备封锁（破阵刃）",
+  ]);
   assert.deepEqual(s.players[0].items, ["i14", "i15"]);
   choose(s, "backItem");
-  assert.ok(choices(s).includes("use:i15:self"));
-  choose(s, "use:i15:other");
-  choose(s, "confirmCleanse");
+  assert.ok(choices(s).includes("use:i15:self:debuff"));
+  choose(s, "use:i15:other:debuff");
+  choose(s, "confirmItem");
   assert.deepEqual(s.players[0].items, ["i14"]);
-  assert.deepEqual(s.battle.statuses["乙"], []);
+  assert.deepEqual(s.battle.statuses["乙"], ["临时防御"]);
   assert.ok(s.battle.statuses["甲"].length);
+  assert.equal(s.battleEffectEvents.at(-1).kind, "cleanse");
+  assert.deepEqual(
+    s.battleEffectEvents.at(-1).changes.map((entry) => entry.id),
+    ["knight", "lock-c01"],
+  );
 });
 
 test("精英数值随地形增长，普通怪全属性提高 1", () => {
@@ -203,8 +327,9 @@ test("精英数值随地形增长，普通怪全属性提高 1", () => {
     ["volcano", 2],
   ]) {
     const b = encounter("e02", {}, { biome }).battle;
-    assert.deepEqual([b.atk, b.def, b.hp], [6 + bonus, 5 + bonus, 3 + bonus]);
+    assert.deepEqual([b.atk, b.def, b.hp], [6 + bonus, 5 + bonus, 4 + bonus]);
   }
+  assert.equal(encounter("e01").battle.hp, 4);
   const b = encounter("n01").battle;
   assert.deepEqual([b.atk, b.def, b.hp], [3, 2, 2]);
 });
@@ -349,7 +474,7 @@ test("战斗动画只保留最近 24 项且换场后序号继续递增", () => {
 });
 
 test("攻击骰与防御骰作差，成功仅扣 1 生命；攻击次数等于行动点", () => {
-  const s = encounter("e01", { atk: 9, act: 3 });
+  const s = encounter("e01", { atk: 9, act: 3 }, { monsterHp: 3 });
   play(s, "attack");
   assert.equal(s.battle.hp, 2);
   assert.equal(s.battle.remaining, 2);
@@ -405,7 +530,7 @@ test("精英史莱姆须打倒两个分裂体，逃走后能原样恢复", () =>
   assert.equal(s.battle.slimes, 1);
   assert.equal(s.battle.remaining, 2);
   assert.equal(s.battle.hp, 2);
-  assert.deepEqual(s.combatEvents.at(-1).fallen, ["$monster"]);
+  assert.deepEqual(s.combatEvents.at(-1).fallen, ["$monster:0"]);
   assert.equal(s.combatEvents.at(-1).frame.battle.slimes, 2);
   const escaped = play(s, "use:i04");
   const next = encounter(
@@ -421,9 +546,9 @@ test("精英史莱姆须打倒两个分裂体，逃走后能原样恢复", () =>
 test("兽人只在防御成功后回血，吸血鬼命中回血，狼人初始获五点生命攻击", () => {
   const orc = encounter("e02", { act: 2 });
   play(orc, "attack", die(6));
-  assert.equal(orc.battle.hp, 2);
-  play(orc, "attack", die(5));
   assert.equal(orc.battle.hp, 3);
+  play(orc, "attack", die(5));
+  assert.equal(orc.battle.hp, 4);
   const vampire = encounter("e04", {}, { monsterHp: 1 });
   play(vampire, "attack");
   play(vampire, "defend");
@@ -432,7 +557,7 @@ test("兽人只在防御成功后回血，吸血鬼命中回血，狼人初始�
   assert.equal(wolf.battle.hp, 9);
   assert.equal(wolf.battle.atk, 10);
   assert.equal(wolf.battle.def, 7);
-  play(wolf, "use:i12:e05.1");
+  playCleanse(wolf, "use:i12:e05.1");
   assert.equal(wolf.battle.maxHp, 4);
   assert.equal(wolf.battle.atk, 5);
 });
@@ -469,7 +594,7 @@ test("嫉妒禁装备和施加可净化减益，破咒后装备恢复", () => {
   assert.equal(s.battle.atk, 12);
   playCleanse(s, "use:i14:self:envy");
   assert.equal(s.battle.atk, 12);
-  play(s, "use:i12:b02.3");
+  playCleanse(s, "use:i12:b02.3");
   play(s, "attack");
   assert.equal(s.battle.last.attack, 3);
 });
@@ -493,7 +618,7 @@ test("怠惰交换属性，相同骰点不能成功，可驱散按失血叠加�
   play(s, "attack");
   assert.equal(s.battle.last.attack, 9);
   assert.equal(s.battle.last.hit, false);
-  play(s, "use:i12:b04.3");
+  playCleanse(s, "use:i12:b04.3");
   play(s, "attack", die(2));
   assert.equal(s.battle.last.hit, true);
   playCleanse(s, "use:i14:self:sloth");
@@ -589,9 +714,9 @@ test("命数棱镜仅在决斗双方掷骰后反转结果，保持骰点和判�
 
 test("命数棱镜反转贪婪免疫结算后的未命中", () => {
   const s = encounter("b05", { atk: 11, items: ["i01", "i12"] });
-  play(s, "use:i12:b05.3");
+  playCleanse(s, "use:i12:b05.3");
   play(s, "attack");
-  assert.match(battleActions(s, "甲")[0].label, /未命中/);
+  assert.match(battleActions(s, "甲")[0].label, /成功防御/);
   play(s, "use:i01");
   assert.equal(s.battle.last.attack, 11);
   assert.equal(s.battle.last.defense, 9);
@@ -710,7 +835,7 @@ test("成功防御可选择赌命护腕，荆棘反击且汲血圣杯每轮只�
   const bracer = encounter("e01", { def: 5, hp: 7, gear: ["c12", "l05"] });
   play(bracer, "attack");
   play(bracer, "defend");
-  assert.equal(bracer.battle.hp, 2);
+  assert.equal(bracer.battle.hp, 3);
   assert.equal(bracer.battle.phase, "optional");
   play(bracer, "equipment", sixes);
   assert.equal(bracer.players[0].hp, 8);
@@ -723,53 +848,61 @@ test("成功防御可选择赌命护腕，荆棘反击且汲血圣杯每轮只�
   assert.equal(chalice.players[0].hp, 8);
 });
 
-test("骑士精神、锁具咒与破咒钉在决斗中可指定目标，百宝袋不受锁具咒影响", () => {
+test("骑士精神固定点数，破咒钉限怪物且百宝袋不受锁具咒影响", () => {
   const s = state(
     hero("甲", { items: ["i13", "i16", "i12"], act: 4 }),
     hero("乙", { def: 5, gear: ["c02", "l16"], items: ["i15"] }),
   );
   startBattle(s, { attackerId: "甲", defenderId: "乙" });
+  assert.ok(!choices(s).includes("use:i12"));
+  choose(s, "use:i13");
   assert.ok(!choices(s).includes("use:i13:l16"));
-  play(s, "use:i13:c02");
+  choose(s, "use:i13:c02");
+  assert.equal(s.battle.itemMenu.effectKey, "c02");
+  assert.deepEqual(s.battle.statuses["乙"], []);
+  choose(s, "confirmItem");
   assert.deepEqual(s.players[1].locked, []);
   assert.ok(
     s.battle.statuses["乙"].some((status) => status.includes("装备封锁")),
   );
   play(s, "use:i16");
   assert.equal(s.battle.remaining, 1);
-  play(s, "use:i12:status:knight");
   play(s, "attack");
   assert.equal(s.battle.attackRoll.count, 2);
   play(s, "defend");
-  assert.equal(s.battle.last.defense, 5);
+  assert.equal(s.battle.last.defense, 2);
 });
 
 test("锁具咒只在决斗中使用，徽章属性可通过净化或下一场决斗恢复", () => {
-  for (const cleanse of ["use:i14:self:lock-c13", "use:i15:self", null]) {
+  for (const cleanse of [
+    "use:i14:self:lock-c13",
+    "use:i15:self:debuff",
+    null,
+  ]) {
     const s = state(
       hero("甲", { act: 2, items: ["i13", "i13"] }),
       hero("乙", {
-        def: 2,
+        def: 3,
         gear: ["c13"],
         items: cleanse ? [cleanse.split(":")[1]] : [],
         badgeStat: "def",
-        alloc: { atk: 0, def: 1, act: 0 },
+        alloc: { atk: 0, def: 2, act: 0 },
       }),
     );
     startBattle(s, { attackerId: "甲", defenderId: "乙" });
-    play(s, "use:i13:c13");
-    assert.ok(!choices(s).includes("use:i13:c13"));
+    playCleanse(s, "use:i13:c13");
+    assert.ok(!choices(s).includes("use:i13"));
     play(s, "attack");
     if (cleanse) playCleanse(s, cleanse);
     play(s, "defend");
-    assert.equal(s.battle.last.defense, cleanse ? 2 : 1);
-    assert.equal(s.players[1].def, 2);
-    assert.deepEqual(s.players[1].alloc, { atk: 0, def: 1, act: 0 });
+    assert.equal(s.battle.last.defense, cleanse ? 3 : 1);
+    assert.equal(s.players[1].def, 3);
+    assert.deepEqual(s.players[1].alloc, { atk: 0, def: 2, act: 0 });
     assert.deepEqual(s.players[1].locked, []);
     startBattle(s, { attackerId: "甲", defenderId: "乙" });
     play(s, "attack");
     play(s, "defend");
-    assert.equal(s.battle.last.defense, 2);
+    assert.equal(s.battle.last.defense, 3);
   }
   const s = encounter("n01", { items: ["i13"] });
   assert.ok(!choices(s).some((id) => id.startsWith("use:i13")));
@@ -834,7 +967,7 @@ test("先声双刃的额外攻击可放弃，断命斧斩杀、奇偶符和属�
   assert.equal(axe.battle.last.attack, 8);
   const sigil = encounter("b01", { gear: ["l14", "l07"], atk: 9, act: 3 });
   play(sigil, "attack");
-  assert.equal(sigil.battle.last.attack, 4);
+  assert.equal(sigil.battle.last.attack, 10);
 });
 
 test("最终头目取值早于头目交换效果，并区分最终胜利与一般怪物奖励", () => {

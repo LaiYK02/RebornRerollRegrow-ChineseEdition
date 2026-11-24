@@ -1,4 +1,4 @@
-import { cards, monsterProfile } from "./cards.mjs";
+import { badgeBonus, cards, monsterProfile } from "./cards.mjs";
 import {
   startBattle,
   battleActions,
@@ -8,11 +8,14 @@ import {
   recordDice,
   refreshAttackAllowance,
   refreshBattleStats,
+  battleMonsterState,
+  restoreEnemyLanes,
   restoreBattleRules,
 } from "./battle.mjs";
 
 const stats = { atk: "攻击", def: "防御", act: "行动" };
-const palette = ["#e76a51", "#35a89a", "#b18aef", "#e2af40"];
+export const MAX_PLAYERS = 5;
+const palette = ["#e76a51", "#35a89a", "#b18aef", "#e2af40", "#509be8"];
 const legendary = (id) => cards[id]?.kind === "传说装备";
 const inPool = (id, prefix) =>
   prefix === "l"
@@ -33,7 +36,7 @@ const capHP = (p, amount) => {
 const itemLimit = (p) => (equipped(p, "l16") ? Infinity : 5);
 const action = (id, label, card) =>
   card ? { id, label, card } : { id, label };
-const rulesVersion = 7;
+const rulesVersion = 8;
 const matchId = () =>
   Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
 
@@ -100,9 +103,15 @@ function board(rng) {
 }
 
 export function restoreGame(game, rng = Math.random) {
-  const oldRules = game.rulesVersion !== rulesVersion;
   const legacyCombat = (game.rulesVersion ?? 0) < 4;
-  const layout = oldRules ? board() : null;
+  const beforeV8 = (game.rulesVersion ?? 0) < 8;
+  if (beforeV8) {
+    for (const p of game.players) {
+      if (p.badgeStat) upgrade(p, p.badgeStat, badgeBonus - 1);
+    }
+  }
+  // Version 6 introduced shuffled maps; only earlier saves use the fixed layout.
+  const layout = (game.rulesVersion ?? 0) < 6 ? board() : null;
   let wasLegacyBoard = false;
   for (const tile of game.board) {
     wasLegacyBoard ||= tile.terrain !== tile.biome;
@@ -127,6 +136,17 @@ export function restoreGame(game, rng = Math.random) {
       delete tile.maxHp;
       delete tile.hp;
       delete tile.monsterState;
+    }
+    if (
+      beforeV8 &&
+      ["e01", "e02"].includes(tile.monster) &&
+      tile.maxHp !== undefined
+    ) {
+      const maxHp = monsterProfile(tile.monster, tile.biome).hp;
+      const delta = maxHp - tile.maxHp;
+      if (tile.hp > 0) tile.hp += delta;
+      if (tile.monsterState?.hp > 0) tile.monsterState.hp += delta;
+      tile.maxHp = maxHp;
     }
   }
   if (legacyCombat) {
@@ -223,13 +243,37 @@ export function restoreGame(game, rng = Math.random) {
         (b.monster === "e05" ? 5 : 0);
     }
   }
-  if ((game.rulesVersion ?? 0) < 7) {
-    const suspended = game.players.map((p) => p.resume?.pending?.battle);
-    for (const battle of new Set([b, ...suspended])) {
-      if (battle?.form !== "final") continue;
+  const suspended = game.players.map((p) => p.resume?.pending?.battle);
+  for (const battle of new Set([b, ...suspended])) {
+    if (!battle) continue;
+    if ((game.rulesVersion ?? 0) < 7 && battle.form === "final") {
       battle.base.atk = (battle.base.atk / 3) * 4;
       battle.base.def = (battle.base.def / 3) * 4;
-      refreshBattleStats({ ...game, battle });
+    }
+    if (beforeV8 && ["e01", "e02"].includes(battle.form)) {
+      const maxHp = monsterProfile(
+        battle.form,
+        battle.biome || tileAt(game, player(game, battle.first)).biome,
+      ).hp;
+      if (battle.hp > 0) battle.hp += maxHp - battle.maxHp;
+      battle.maxHp = maxHp;
+    }
+    const state = { ...game, battle };
+    if (beforeV8 && battle.itemMenu) delete battle.itemMenu;
+    restoreEnemyLanes(state);
+    refreshBattleStats(state);
+    if (beforeV8) {
+      for (const id of battle.actors) {
+        if (player(game, id).badgeStat === "act")
+          refreshAttackAllowance(state, id);
+      }
+    }
+  }
+  if (beforeV8) {
+    // A pending old confirmation must choose which group of statuses to clear.
+    for (const state of [game, ...game.players.map((p) => p.resume)]) {
+      if (state?.phase === "itemTarget" && state.pending.id === "i15")
+        delete state.pending.target;
     }
   }
   game.rulesVersion = rulesVersion;
@@ -242,11 +286,11 @@ export function newGame(roster, rng = Math.random) {
   if (
     !Array.isArray(roster) ||
     roster.length < 1 ||
-    roster.length > 4 ||
+    roster.length > MAX_PLAYERS ||
     roster.some((p) => !p.id || !p.name) ||
     new Set(roster.map((p) => p.id)).size !== roster.length
   ) {
-    throw new Error("需要 1 至 4 名不同的玩家");
+    throw new Error("需要 1 至 " + MAX_PLAYERS + " 名不同的玩家");
   }
   const players = roster.map((p, i) => ({
     id: p.id,
@@ -326,6 +370,7 @@ function nextTurn(game, rng) {
         phase(game, "battle");
         game.battle = saved.battle;
         game.dice = saved.dice;
+        restoreEnemyLanes(game);
         refreshAttackAllowance(game, next.id);
       } else if (tile.monster === saved.monster) resolveSpace(game, next, rng);
       else phase(game, "move");
@@ -347,8 +392,7 @@ function syncBadge(game, p) {
   if (active === p.badgeActive) return;
   if (active) grantUpgrade(game, p, 1, "badge");
   else if (p.badgeStat) {
-    p[p.badgeStat]--;
-    p.alloc[p.badgeStat]--;
+    upgrade(p, p.badgeStat, -badgeBonus);
     p.badgeStat = null;
   } else
     game.upgrades = game.upgrades.filter(
@@ -363,7 +407,7 @@ function upgrade(p, stat, change = 1) {
 }
 
 function permanentUpgrades(p, stat) {
-  return p.alloc[stat] - Number(p.badgeStat === stat);
+  return p.alloc[stat] - (p.badgeStat === stat ? badgeBonus : 0);
 }
 
 function redistribute(game, p) {
@@ -579,16 +623,22 @@ function resolveSpace(game, p, rng) {
     case "boss": {
       const tier =
         tile.type === "normal" ? "n" : tile.type === "elite" ? "e" : "b";
-      const deck = pool(tier).flatMap((id) =>
-        Array(id === "n04" ? 2 : 1).fill(id),
-      );
+      const deck = pool(tier);
       tile.monster ??= tile.boss || randomOne(deck, rng);
       tile.encounter = (tile.encounter || 0) + 1;
       const profile = monsterProfile(tile.monster, tile.biome);
       const maxHp = profile.hp + (tile.monster === "e05" ? 5 : 0);
-      if (tile.hp !== undefined && !tile.monsterState?.slimes)
+      if (
+        tile.hp !== undefined &&
+        !tile.monsterState?.slimes &&
+        !tile.monsterState?.enemies
+      )
         tile.hp += maxHp - (tile.maxHp ?? maxHp);
-      if (tile.monsterState && !tile.monsterState.slimes)
+      if (
+        tile.monsterState &&
+        !tile.monsterState.slimes &&
+        !tile.monsterState.enemies
+      )
         tile.monsterState.hp = tile.hp;
       tile.maxHp = maxHp;
       tile.hp ??= tile.maxHp;
@@ -640,11 +690,15 @@ function afterEncounter(game, p, rng, portal, trapped = false) {
   else resolveSpace(game, p, rng);
 }
 
+function plannedDestination(game, p, destination) {
+  return (
+    game.board.slice(p.pos, destination).find((tile) => tile.banana)?.pos ??
+    destination
+  );
+}
+
 function moveForward(game, p, destination, rng, stepwise) {
-  const banana = game.board
-    .slice(p.pos, destination)
-    .find((tile) => tile.banana);
-  relocate(game, p, banana?.pos ?? destination, false, stepwise);
+  relocate(game, p, plannedDestination(game, p, destination), false, stepwise);
   log(game, p.name + " 移动至第 " + p.pos + " 格。");
   land(game, p, rng, { destination, stepwise });
 }
@@ -886,12 +940,24 @@ function statusOptions(p) {
       buff: "增益",
       debuff: "减益",
     };
-    return { key: String(i), text: s.label || translated[s.type] || s.type };
+    return {
+      key: String(i),
+      text: s.label || translated[s.type] || s.type,
+      type: s.type === "buff" ? "buff" : "debuff",
+    };
   });
   if (p.movePenalty)
-    options.push({ key: "snare", text: "移动判定 " + p.movePenalty });
+    options.push({
+      key: "snare",
+      text: "移动判定 " + p.movePenalty,
+      type: p.movePenalty > 0 ? "buff" : "debuff",
+    });
   for (const id of p.locked)
-    options.push({ key: "gear-" + id, text: "封锁的" + nameOf(id) });
+    options.push({
+      key: "gear-" + id,
+      text: "封锁的" + nameOf(id),
+      type: "debuff",
+    });
   return options;
 }
 
@@ -909,32 +975,45 @@ function targetOptions(game, p, id) {
         q === p &&
         (game.phase === "banana" || game.pending.back?.value === "banana")
       )
-        available.push({ key: "banana", text: "香蕉皮 · 继续移动" });
+        available.push({
+          key: "banana",
+          text: "香蕉皮 · 继续移动",
+          type: "debuff",
+        });
       if (
         id === "i15" &&
         available.length &&
         (selected === undefined || selected === index)
       ) {
         const confirming = selected !== undefined;
-        result.push(
-          action(
-            "target:" + index + (confirming ? ":all" : ""),
-            confirming
-              ? "确认驱散" + q.name + "的全部状态"
-              : "查看" + q.name + "的状态",
-            id,
-          ),
-        );
+        for (const type of confirming
+          ? [game.pending.effectType]
+          : ["buff", "debuff"]) {
+          if (!available.some((status) => status.type === type)) continue;
+          const group = type === "buff" ? "增益" : "减益";
+          result.push({
+            ...action(
+              "target:" + index + ":" + (confirming ? "confirm" : type),
+              (confirming ? "确认驱散" : "选择") + q.name + "的全部" + group,
+              id,
+            ),
+            targetId: q.id,
+            effectType: type,
+          });
+        }
       }
       if (id === "i14")
         for (const st of available) {
-          result.push(
-            action(
+          result.push({
+            ...action(
               "target:" + index + ":" + st.key,
               q.name + " · " + st.text,
               id,
             ),
-          );
+            targetId: q.id,
+            effectType: st.type,
+            effectKey: st.key,
+          });
         }
     }
   }
@@ -961,15 +1040,23 @@ function itemAction(card, label) {
 }
 
 function boardItemMenu(game) {
-  const { id, target } = game.pending;
+  const { id, target, effectType } = game.pending;
   if (id === "i15" && target !== undefined) {
     const q = game.players[target];
     return {
       card: id,
       stage: "confirm",
       target: q.name,
-      summary: "确认后驱散" + q.name + "的全部增益与减益",
-      detail: statusOptions(q).map((option) => option.text),
+      targetId: q.id,
+      effectType,
+      summary:
+        "确认后驱散" +
+        q.name +
+        "的全部" +
+        (effectType === "buff" ? "增益" : "减益"),
+      detail: statusOptions(q)
+        .filter((option) => option.type === effectType)
+        .map((option) => option.text),
     };
   }
   return {
@@ -1023,10 +1110,22 @@ function useItem(game, p, id, rng) {
     case "i10":
       tileAt(game, p).banana = true;
       break;
-    case "i11":
+    case "i11": {
       relocate(game, p, 1);
+      const before = p.hp;
+      capHP(p, 3);
+      log(
+        game,
+        p.name +
+          " 回到起点，当前生命 " +
+          p.hp +
+          "（+" +
+          (p.hp - before) +
+          "）。",
+      );
       phase(game, "end");
       break;
+    }
   }
 }
 
@@ -1046,10 +1145,12 @@ function resolveBanana(game, p, rng, cleansed) {
 function applyTarget(game, p, parts, rng) {
   const id = game.pending.id;
   const [, target, opt] = parts;
-  if (id === "i15" && opt === undefined) {
+  if (id === "i15" && opt !== "confirm") {
     game.pending.target = Number(target);
+    game.pending.effectType = opt;
     return;
   }
+  const effectType = game.pending.effectType;
   goBack(game);
   if (id === "i14" && opt === "banana") {
     resolveBanana(game, p, rng, true);
@@ -1067,10 +1168,9 @@ function applyTarget(game, p, parts, rng) {
     if (id === "i17") q.movePenalty -= 2;
     else if (id === "i14") removeStatus(game, q, opt);
     else if (id === "i15") {
-      q.statuses = [];
-      q.movePenalty = 0;
-      q.locked = [];
-      syncBadge(game, q);
+      for (const status of statusOptions(q).reverse()) {
+        if (status.type === effectType) removeStatus(game, q, status.key);
+      }
     }
   }
 }
@@ -1117,7 +1217,15 @@ function actions(game, id) {
     return Object.entries(stats)
       .filter(([stat]) => !loss || permanentUpgrades(p, stat) > 0)
       .map(([stat, name]) =>
-        action("upgrade:" + stat, name + (loss ? " −1" : " +1")),
+        action(
+          "upgrade:" + stat,
+          name +
+            (loss
+              ? " −1"
+              : required.kind === "badge"
+                ? " +" + badgeBonus
+                : " +1"),
+        ),
       );
   }
   if (game.phase === "battle") return battleActions(game, id);
@@ -1237,13 +1345,17 @@ function performAction(game, playerId, actionId, rng) {
   if (required) {
     const stat = actionId.split(":")[1];
     const loss = required.kind === "downgrade";
-    upgrade(p, stat, loss ? -1 : 1);
+    const amount = loss ? -1 : required.kind === "badge" ? badgeBonus : 1;
+    upgrade(p, stat, amount);
     if (required.kind === "badge") p.badgeStat = stat;
     if (--required.count === 0) removeOne(game.upgrades, required);
     if (stat === "act") refreshAttackAllowance(game, p.id);
     log(
       game,
-      p.name + " 的" + stats[stat] + (loss ? "降低 1 点。" : "提升 1 点。"),
+      p.name +
+        " 的" +
+        stats[stat] +
+        (loss ? "降低 1 点。" : "提升 " + amount + " 点。"),
     );
     return;
   }
@@ -1346,7 +1458,7 @@ function interruptOffline(game) {
     if (b.monster) {
       const tile = tileAt(game, player(game, b.first));
       tile.hp = b.hp;
-      tile.monsterState = { hp: b.hp, form: b.form, slimes: b.slimes };
+      tile.monsterState = battleMonsterState(b);
       phase(game, "resumeMonster", {
         monster: b.monster,
         encounter: tile.encounter,
@@ -1467,6 +1579,66 @@ function diceReview(game) {
   };
 }
 
+function movementPreview(game, viewer) {
+  if (game.check?.kind !== "move") return null;
+  const p = player(game, game.actor);
+  const end = Math.min(100, p.pos + Math.max(0, game.check.total));
+  const to = plannedDestination(game, p, end);
+  const preview = {
+    id: p.id,
+    from: p.pos,
+    to,
+    path: game.board.slice(p.pos, to).map((tile) => tile.pos),
+  };
+  if (p.pos === to) return { ...preview, final: to };
+  let pos = to,
+    retreated = game.turnTerrain.includes("desert"),
+    teleported = false;
+  while (true) {
+    const tile = game.board[pos - 1];
+    // A cleanse, skirmish or lethal hazard can change the final position after confirmation.
+    if (tile.banana && (viewer !== p.id || carried(p, "i14"))) return preview;
+    if (!equipped(p, "l10")) {
+      if (tile.terrain === "desert" && !retreated && !tile.banana) {
+        retreated = true;
+        pos--;
+        continue;
+      }
+      if (
+        tile.terrain === "volcano" &&
+        p.hp <= 1 &&
+        !game.turnTerrain.includes("volcano")
+      )
+        return preview;
+    }
+    if (
+      pos > 1 &&
+      game.players.some(
+        (other) => other.id !== p.id && other.online && other.pos === pos,
+      )
+    )
+      return preview;
+    if (tile.type === "portal" && !teleported) {
+      if (!tile.banana && (viewer !== p.id || carried(p, "i05")))
+        return preview;
+      teleported = true;
+      pos = tile.to;
+      continue;
+    }
+    return { ...preview, final: pos };
+  }
+}
+
+function boardStats(p) {
+  const bonus = equipped(p, "l14") ? Math.floor(p.act / 5) : 0;
+  const crest = equipped(p, "l07");
+  return {
+    atk: p.atk + bonus + Number(crest && p.hp >= 6),
+    def: p.def + bonus + Number(crest && p.hp <= 5),
+    act: p.act,
+  };
+}
+
 export function view(game, id) {
   const b = game.battle;
   let battle = null;
@@ -1506,6 +1678,14 @@ export function view(game, id) {
       "baseAtk",
       "rageBonus",
       "slimes",
+      "enemies",
+      "targetIndex",
+      "attackingEnemy",
+      "enemyAttackQueue",
+      "enemyAttackCount",
+      "strikeResult",
+      "effectEntries",
+      "statusEntries",
     ];
     battle = Object.fromEntries(
       fields.filter((k) => b[k] !== undefined).map((k) => [k, b[k]]),
@@ -1526,6 +1706,7 @@ export function view(game, id) {
       atk: p.atk,
       def: p.def,
       act: p.act,
+      effectiveStats: battle?.combatants[p.id] || boardStats(p),
       gear: p.gear,
       locked: [
         ...new Set([
@@ -1535,6 +1716,11 @@ export function view(game, id) {
         ]),
       ],
       statuses: p.statuses,
+      statusEntries: statusOptions(p).map(({ key, text, type }) => ({
+        id: key,
+        label: text,
+        type,
+      })),
       movePenalty: p.movePenalty,
       equipCapacity: 3,
       itemCapacity: Number.isFinite(itemLimit(p)) ? itemLimit(p) : null,
@@ -1543,7 +1729,9 @@ export function view(game, id) {
     })),
     board: game.board.map(({ monsterState, encounter, ...tile }) => tile),
     matchId: game.matchId,
+    maxPlayers: MAX_PLAYERS,
     combatEvents: game.combatEvents || [],
+    battleEffectEvents: game.battleEffectEvents || [],
     turn: game.turn,
     actor: actorId(game),
     phase: pendingUpgrade(game) && !game.winner ? "upgrade" : game.phase,
@@ -1556,6 +1744,7 @@ export function view(game, id) {
     prompt: describe(game, id),
     dice: game.dice ? { ...game.dice, review: diceReview(game) } : null,
     movementSequence: game.sequence,
+    movementPreview: movementPreview(game, id),
     movements: game.movements || [],
   });
 }

@@ -7,7 +7,7 @@ import { isIPv4 } from "node:net";
 import { hostname, networkInterfaces } from "node:os";
 import { dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { act, newGame, setOnline, view } from "./game.mjs";
+import { MAX_PLAYERS, act, newGame, setOnline, view } from "./game.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const publicFiles = new Set([
@@ -364,8 +364,8 @@ export function createRoomServer({ now = Date.now, offlineMs = 25_000 } = {}) {
       if (route === "join") {
         if (room.game)
           fail(409, "IN_GAME", "游戏已经开始，只有原有玩家可以重连。");
-        if (room.players.length >= 4)
-          fail(409, "ROOM_FULL", "房间已满，最多允许 4 名玩家。");
+        if (room.players.length >= MAX_PLAYERS)
+          fail(409, "ROOM_FULL", `房间已满，最多允许 ${MAX_PLAYERS} 名玩家。`);
         const seat = newSeat(body, room.players, time);
         room.players.push(seat);
         return reply(res, 200, { token: seat.token, room: snapshot(seat) });

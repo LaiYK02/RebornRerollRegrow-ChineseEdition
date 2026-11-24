@@ -95,7 +95,7 @@ test("奖励牌在场中显示卡图、名称和完整效果，先打开确认",
     /class="stage".*class="reward-panel".*data-card-choice="take:i02".*i02\.jpg/,
   );
   assert.ok(html.includes(ui.esc(cards.i02.text)));
-  assert.ok(html.includes(ui.esc(cards.l16.text)));
+  assert.ok(html.includes(cards.l16.text.split("\n").map(ui.esc).join("<br>")));
   assert.doesNotMatch(html, /data-action="take:/);
   assert.match(html, /data-action="passOffer"/);
 });
@@ -115,7 +115,7 @@ test("替换道具时手牌只高亮合法目标，并保留现有道具说明",
     /class="hand-card is-usable is-replaceable".*data-card-choice="replace:i02"/,
   );
   assert.match(html, /class="hand-card is-unavailable" data-hand-item="i09"/);
-  assert.ok(html.includes(ui.esc(cards.i09.text)));
+  assert.ok(html.includes(cards.i09.text.split("\n").map(ui.esc).join("<br>")));
   assert.doesNotMatch(html, /data-action="replace:/);
 });
 
@@ -187,9 +187,8 @@ test("野怪战中骑士居左，怪物和活跃分裂体有独立动画目标",
   const html = battle(view(state, "0"));
   assert.match(
     html,
-    /data-combatant="0".*data-combatant="\$monster".*data-combat-focus.*当前目标/,
+    /data-combatant="0".*combat-target" data-combatant="\$monster:0".*当前目标.*data-combatant="\$monster:1"/,
   );
-  assert.equal([...html.matchAll(/data-combat-focus/g)].length, 1);
 });
 
 test("骰子以完整格子排入可用空间，过多时保留剩余骰子的页", () => {
@@ -227,9 +226,102 @@ test("棋盘显示香蕉皮，两只分裂史莱姆同时显示并标出当前�
     monsterId: "e03",
     monsterState: { form: "n01", slimes: 2 },
   });
-  assert.match(battle(view(state, "0")), /左侧 · 当前目标.*右侧 · 等待出战/);
-  state.battle.slimes = 1;
+  assert.match(
+    battle(view(state, "0")),
+    /左侧 · 当前目标.*data-combatant="\$monster:1"/,
+  );
+  state.battle.enemies[0].hp = 0;
+  state.battle.targetIndex = 1;
   assert.match(battle(view(state, "0")), /左侧 · 已击败.*右侧 · 当前目标/);
+});
+
+test("五名玩家的棋子同格可见，四名同伴平均分列", () => {
+  const players = [
+    ...roster,
+    { id: "4", name: "长夜", color: "#cb932d", online: true },
+  ];
+  const state = newGame(players);
+  const html = renderGame(
+    { you: "0", hostId: "0", chat: [], game: view(state, "0") },
+    false,
+  );
+  assert.match(
+    html,
+    /seat-left.*data-player="1".*data-player="3".*class="stage".*seat-right.*data-player="2".*data-player="4"/,
+  );
+  assert.match(html, /data-count="5"/);
+});
+
+test("移动预览标明起点、经过、预计停止和结算位", () => {
+  const players = view(newGame(roster), "0");
+  const html = board({
+    ...players,
+    movementPreview: { id: "0", from: 1, to: 3, path: [2, 3], final: 2 },
+  });
+  assert.match(html, /data-tile="1" data-preview="from"/);
+  assert.match(html, /data-tile="2" data-preview="final"/);
+  assert.match(html, /data-tile="3" data-preview="destination"/);
+  assert.doesNotMatch(html, /data-tile="4" data-preview/);
+});
+
+test("双方骰点分别显示于各自卡牌底部，成功结果随防守方显示", () => {
+  const state = newGame(roster);
+  startBattle(state, { attackerId: "0", defenderId: "1" });
+  const g = view(state, "0");
+  Object.assign(g.battle, {
+    attackRoll: { id: "0", dice: [2], total: 2 },
+    defenseRoll: { id: "1", dice: [5], total: 5 },
+    strikeResult: "成功防御",
+  });
+  const html = battle(g);
+  assert.match(
+    html,
+    /data-combatant="1".*data-roll-for="1"><span><b>防御判定.*成功防御.*data-combatant="0".*data-roll-for="0"><span><b>攻击判定/,
+  );
+  assert.match(html, /<aside class="passives"[^>]*><h3>特殊效果<\/h3>/);
+  assert.equal([...html.matchAll(/class="effect-empty">无/g)].length, 4);
+});
+
+test("净化选项在战斗右侧只显示一次，增益和减益可分别选中", () => {
+  const state = newGame(roster);
+  startBattle(state, { attackerId: "0", defenderId: "1" });
+  const g = view(state, "0");
+  g.battle.itemMenu = { card: "i15", stage: "target" };
+  g.battle.statusEntries = {
+    1: [
+      { id: "extra", label: "借运骰", type: "buff" },
+      { id: "disarm", label: "缴械", type: "debuff" },
+    ],
+  };
+  g.actions = [
+    {
+      id: "use:i15:other:buff",
+      source: "status",
+      targetId: "1",
+      effectType: "buff",
+    },
+    {
+      id: "use:i15:other:debuff",
+      source: "status",
+      targetId: "1",
+      effectType: "debuff",
+    },
+    { id: "cancelItem", label: "取消" },
+  ];
+  const html = renderGame({ you: "0", hostId: "0", game: g, chat: [] }, false);
+  assert.match(
+    html,
+    /effect-group-target" data-action="use:i15:other:buff" data-effect-type="buff".*借运骰/,
+  );
+  assert.match(
+    html,
+    /effect-group-target" data-action="use:i15:other:debuff" data-effect-type="debuff".*缴械/,
+  );
+  assert.equal(
+    [...html.matchAll(/data-action="use:i15:other:buff"/g)].length,
+    1,
+  );
+  assert.match(html, /class="actions options-open".*data-action="cancelItem"/);
 });
 
 test("全部卡图可读取，十九句彩蛋与中文版道具列表逐字相同", async () => {

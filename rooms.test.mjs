@@ -61,7 +61,7 @@ async function openServer(t) {
   };
 }
 
-test("four seats, private chat, authenticated controls and a fresh room after destruction", async (t) => {
+test("five seats, private chat, authenticated controls and a fresh room after destruction", async (t) => {
   const { request } = await openServer(t);
   assert.equal(
     (await request("join", { body: { name: "Guest" } })).status,
@@ -100,8 +100,11 @@ test("four seats, private chat, authenticated controls and a fresh room after de
   );
   await request("join", { body: { name: "Sam" } });
   await request("join", { body: { name: "Nia" } });
+  const fifth = await request("join", { body: { name: "Fifth" } });
+  assert.equal(fifth.status, 200);
+  assert.equal(fifth.room.players.length, 5);
   assert.equal(
-    (await request("join", { body: { name: "Fifth" } })).status,
+    (await request("join", { body: { name: "Sixth" } })).status,
     409,
   );
   assert.equal(
@@ -125,6 +128,17 @@ test("four seats, private chat, authenticated controls and a fresh room after de
   assert.equal(state.room.chat.at(-1).name, "Mei");
   assert.equal(state.room.chat.at(-1).text, "Hello room");
   assert.ok(!JSON.stringify(state.room).includes(guest.token));
+  const started = await request("start", { token: host.token, body: {} });
+  assert.equal(started.status, 200);
+  assert.equal(started.room.game.players.length, 5);
+  const rejoined = await request("state", { token: fifth.token });
+  assert.equal(rejoined.status, 200);
+  assert.equal(rejoined.room.you, fifth.room.you);
+  assert.equal(
+    rejoined.room.game.players.find((p) => p.id === fifth.room.you).pos,
+    1,
+  );
+  assert.deepEqual(rejoined.room.game.board, started.room.game.board);
   await request("destroy", { token: host.token, body: {} });
   const fresh = await request("create", { body: { name: "Host" } });
   assert.notEqual(fresh.room.id, host.room.id);

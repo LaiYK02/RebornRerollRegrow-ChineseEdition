@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { act, newGame, restoreGame, setOnline, view } from "./game.mjs";
+import {
+  act,
+  MAX_PLAYERS,
+  newGame,
+  restoreGame,
+  setOnline,
+  view,
+} from "./game.mjs";
 import { cards } from "./cards.mjs";
 
 const fixedLayout = () => 0.999999;
@@ -27,6 +34,178 @@ function step(game, action, rng = () => 0) {
 }
 const die = (n) => () => (n - 0.5) / 6;
 const ids = (g, id = actor(g)) => view(g, id).actions.map((a) => a.id);
+
+test("五个独立座位有不同的默认棋色，第五位可行动并可重连", () => {
+  const roster = Array.from({ length: MAX_PLAYERS }, (_, i) => ({
+    id: String(i),
+    name: "玩家" + i,
+  }));
+  assert.equal(MAX_PLAYERS, 5);
+  assert.throws(() => newGame([...roster, { id: "6", name: "第六人" }]));
+  const g = newGame(roster, fixedLayout);
+  assert.equal(view(g, "4").maxPlayers, 5);
+  assert.equal(new Set(g.players.map((p) => p.color)).size, 5);
+  for (const p of roster.slice(0, 4)) setOnline(g, p.id, false);
+  choose(g, "roll", die(1));
+  assert.equal(g.turn, "4");
+  choose(g, "check:accept");
+  assert.equal(g.players[4].pos, 2);
+  setOnline(g, "4", false);
+  setOnline(g, "4", true);
+  assert.equal(view(g, "4").phase, "rest");
+});
+
+test("确认移动前预览路线，随调整更新并停在首个香蕉皮，沙漠退格可预测", () => {
+  const g = pair();
+  const p = g.players[0];
+  p.pos = 27;
+  p.items = ["i19"];
+  g.board[31].banana = true;
+  choose(g, "roll", die(6));
+  const trail = {
+    id: p.id,
+    from: 27,
+    to: 32,
+    path: [28, 29, 30, 31, 32],
+    final: 32,
+  };
+  assert.deepEqual(view(g, p.id).movementPreview, trail);
+  assert.deepEqual(view(g, "b").movementPreview.path, trail.path);
+  assert.equal(p.pos, 27);
+  assert.ok(g.board[31].banana);
+  choose(g, "use:i19");
+  choose(g, "target:-2");
+  assert.deepEqual(view(g, p.id).movementPreview, {
+    id: p.id,
+    from: 27,
+    to: 31,
+    path: [28, 29, 30, 31],
+    final: 30,
+  });
+  choose(g, "check:accept");
+  assert.equal(p.pos, 30);
+  assert.equal(view(g, p.id).movementPreview, null);
+});
+
+test("想家了成功返乡后回血三点，终点主动返乡保留原有血量", () => {
+  for (const [before, after] of [
+    [4, 7],
+    [9, 10],
+  ]) {
+    const g = solo(),
+      p = g.players[0];
+    p.pos = 8;
+    p.items = ["i11"];
+    p.hp = before;
+    choose(g, "use:i11");
+    assert.equal(p.pos, 1);
+    assert.equal(p.hp, after);
+  }
+  const g = solo(),
+    p = g.players[0];
+  p.pos = 100;
+  p.hp = 3;
+  g.phase = "finish";
+  choose(g, "return");
+  assert.equal(p.hp, 3);
+});
+
+test("旧版徽章加成与精英生命只升级一次，已受伤害和未选属性都保留", () => {
+  const g = pair();
+  const [p, q] = g.players;
+  p.gear = ["c13"];
+  p.badgeActive = true;
+  p.badgeStat = "def";
+  p.def = 4;
+  p.alloc.def = 3;
+  p.pos = 18;
+  step(g, "roll", die(1));
+  g.rulesVersion = 7;
+  Object.assign(g.battle, { hp: 2, maxHp: 3 });
+  Object.assign(g.board[18], {
+    hp: 2,
+    maxHp: 3,
+    monsterState: { hp: 2, form: "e01" },
+  });
+  restoreGame(g);
+  restoreGame(g);
+  assert.equal(p.def, 5);
+  assert.equal(p.alloc.def, 4);
+  assert.equal(q.alloc.def, 0);
+  assert.deepEqual(
+    [g.battle.hp, g.battle.maxHp, g.board[18].monsterState.hp],
+    [3, 4, 3],
+  );
+  assert.equal(g.rulesVersion, 8);
+  assert.deepEqual(g.upgrades, []);
+});
+
+test("旧版随机棋盘升级后保留每个格子、怪物和传送门配对", () => {
+  const g = newGame([{ id: "a", name: "甲" }], generator(8));
+  g.rulesVersion = 7;
+  const normal = g.board.find((tile) => tile.type === "normal");
+  Object.assign(normal, { monster: "n03", hp: 1, maxHp: 2 });
+  const before = structuredClone(g.board);
+  restoreGame(g);
+  assert.deepEqual(g.board, before);
+});
+
+test("三相战印在地图面板保留基础数值并按每五个行动点增加攻防", () => {
+  const g = solo(),
+    p = g.players[0];
+  p.gear = ["l14"];
+  p.act = 9;
+  assert.deepEqual(view(g, p.id).players[0].effectiveStats, {
+    atk: 2,
+    def: 2,
+    act: 9,
+  });
+  p.act = 10;
+  assert.deepEqual(view(g, p.id).players[0].effectiveStats, {
+    atk: 3,
+    def: 3,
+    act: 10,
+  });
+  assert.equal(p.atk, 1);
+  assert.equal(p.def, 1);
+});
+
+test("两只哥布林的血量在逃跑、断线和存档后仍独立保留", () => {
+  const g = pair();
+  const [p, q] = g.players;
+  p.pos = 3;
+  p.atk = 4;
+  p.act = 2;
+  p.items = ["i04"];
+  g.board[3].monster = "n04";
+  step(g, "roll", die(1));
+  const hp = (game) => view(game, p.id).battle.enemies.map((enemy) => enemy.hp);
+  assert.deepEqual(hp(g), [2, 2]);
+  step(g, "attack", die(6));
+  assert.deepEqual(hp(g), [1, 2]);
+  choose(g, "use:i04");
+  assert.deepEqual(
+    g.board[3].monsterState.enemies.map((enemy) => enemy.hp),
+    [1, 2],
+  );
+  q.pos = 1;
+  step(g, "roll", die(1));
+  step(g, "heal");
+  p.pos = 3;
+  step(g, "roll", die(1));
+  assert.deepEqual(hp(g), [1, 2]);
+  setOnline(g, p.id, false);
+  const saved = restoreGame(JSON.parse(JSON.stringify(g)));
+  setOnline(saved, p.id, true);
+  saved.players[1].pos = 1;
+  step(saved, "roll", die(1));
+  step(saved, "heal");
+  assert.deepEqual(hp(saved), [1, 2]);
+  assert.equal(
+    saved.battle.fighters.$monster,
+    saved.battle.enemyFighters[saved.battle.targetIndex],
+  );
+});
 
 test("骰子确认标记跟随同一次判定，修改结果不换骰且确认后清空", () => {
   const g = solo(),
@@ -61,7 +240,10 @@ test("决斗骰子确认标记随攻防阶段和行动者切换", () => {
   assert.equal(dice().review, null);
   choose(g, "defend", die(1));
   const roll = dice();
-  assert.deepEqual(roll.review, { key: "battle:reaction:b", result: "命中" });
+  assert.deepEqual(roll.review, {
+    key: "battle:reaction:b",
+    result: "成功攻击",
+  });
   choose(g, "confirm");
   assert.equal(dice().rollId, roll.rollId);
   assert.equal(dice().review.key, "battle:reaction:a");
@@ -180,9 +362,12 @@ test("锁具咒只在当前 PvP 生效，决斗结束或中断后恢复装备", 
     incumbent.gear = ["c10"];
     incumbent.items = ["i13"];
     step(g, "roll", die(1));
+    step(g, "use:i13");
     step(g, "use:i13:c02");
+    step(g, "confirmItem");
     const gearState = () => view(g, "a").players[0].locked;
     assert.deepEqual(gearState(), ["c02"]);
+    assert.equal(view(g, "a").battleEffectEvents.at(-1).card, "i13");
     if (disconnect) setOnline(g, "b", false);
     else
       for (const action of [
@@ -341,10 +526,11 @@ test("场外净化只在有目标时可用，大净化列出完整状态并等�
   assert.equal(view(g, p.id).itemMenu, null);
   assert.deepEqual(p.items, ["i14", "i15"]);
   choose(g, "use:i15");
-  choose(g, "target:1");
+  assert.ok(ids(g).includes("target:1:buff"));
+  choose(g, "target:1:debuff");
   const menu = view(g, p.id).itemMenu;
   assert.equal(menu.stage, "confirm");
-  assert.deepEqual(menu.detail, ["强化", "晕眩", "移动判定 -2"]);
+  assert.deepEqual(menu.detail, ["晕眩", "移动判定 -2"]);
   assert.deepEqual(
     q.statuses.map((s) => s.type),
     ["buff", "stunned"],
@@ -352,9 +538,9 @@ test("场外净化只在有目标时可用，大净化列出完整状态并等�
   assert.deepEqual(p.items, ["i14", "i15"]);
   const resumed = restoreGame(JSON.parse(JSON.stringify(g)));
   assert.deepEqual(view(resumed, p.id).itemMenu, menu);
-  choose(g, "target:1:all");
+  choose(g, "target:1:confirm");
   assert.equal(view(g, p.id).itemMenu, null);
-  assert.deepEqual(q.statuses, []);
+  assert.deepEqual(q.statuses, [{ type: "buff", label: "强化" }]);
   assert.equal(q.movePenalty, 0);
   assert.deepEqual(p.items, ["i14"]);
 });
@@ -369,8 +555,8 @@ test("战斗重置卡逐点重分永久升级和徽章，保留基础点与本�
   Object.assign(p, {
     atk: 4,
     def: 1,
-    act: 2,
-    alloc: { atk: 2, def: 0, act: 1 },
+    act: 3,
+    alloc: { atk: 2, def: 0, act: 2 },
   });
   p.items = ["i06", "i07"];
   step(g, "roll", die(1));
@@ -382,9 +568,9 @@ test("战斗重置卡逐点重分永久升级和徽章，保留基础点与本�
   choose(g, "upgrade:def");
   choose(g, "upgrade:act");
   choose(g, "upgrade:act");
-  assert.deepEqual([p.atk, p.def, p.act], [2, 2, 3]);
+  assert.deepEqual([p.atk, p.def, p.act], [2, 2, 4]);
   assert.equal(p.badgeStat, "act");
-  assert.equal(g.battle.remaining, 4);
+  assert.equal(g.battle.remaining, 5);
   assert.deepEqual(p.items, []);
   assert.ok(ids(g).includes("attack"));
 });
@@ -913,13 +1099,13 @@ test("monster damage persists on escape, resets on death and grants all tier rew
   step(g, "roll", die(1));
   assert.equal(g.battle.monster, "e01");
   step(g, "attack", die(4));
-  assert.equal(g.battle.hp, 2);
+  assert.equal(g.battle.hp, 3);
   step(g, "use:i04");
-  assert.equal(g.board[18].hp, 2);
+  assert.equal(g.board[18].hp, 3);
   assert.equal(g.upgrades.length, 0);
   p.pos = 18;
   step(g, "roll", die(1));
-  assert.equal(g.battle.hp, 2);
+  assert.equal(g.battle.hp, 3);
   p.hp = 1;
   p.atk = 1;
   p.act = 1;
@@ -928,7 +1114,7 @@ test("monster damage persists on escape, resets on death and grants all tier rew
   for (let i = 0; i < 12 && g.battle; i++) step(g, ids(g)[0], die(2));
   assert.equal(p.pos, 1);
   assert.equal(p.hp, 10);
-  assert.equal(g.board[18].hp, 3);
+  assert.equal(g.board[18].hp, 4);
   assert.equal(g.phase, "deathDiscard");
   assert.equal(g.upgrades.length, 0);
   step(g, "discard:l08");
@@ -978,7 +1164,7 @@ test("equipment replacement, badge withdrawal, bag loss, parity conflict and ite
   offer("c13");
   assert.equal(view(g, p.id).phase, "upgrade");
   step(g, "upgrade:atk");
-  assert.equal(p.atk, 2);
+  assert.equal(p.atk, 3);
   offer("c07");
   offer("l16");
   offer("c08");
@@ -1015,8 +1201,8 @@ test("returning to Start, legendary sacrifice, board cleanses and redistribution
   step(g, "target:1");
   assert.equal(q.movePenalty, -2);
   step(g, "use:i15");
-  step(g, "target:1");
-  step(g, "target:1:all");
+  step(g, "target:1:debuff");
+  step(g, "target:1:confirm");
   assert.deepEqual(q.locked, []);
   assert.equal(q.movePenalty, 0);
   p.pos = 99;
@@ -1117,7 +1303,7 @@ test("悟技徽章进入传说宝箱，归途传承印存活返乡时也弃置",
   g.phase = "finish";
   step(g, "return");
   assert.equal(p.pos, 1);
-  assert.deepEqual([p.atk, p.def, p.act], [3, 2, 2]);
+  assert.deepEqual([p.atk, p.def, p.act], [4, 2, 2]);
   assert.deepEqual(p.gear, ["c13"]);
 });
 
@@ -1135,7 +1321,7 @@ test("陷阱只降低永久升级，弃置悟技徽章才会移除徽章加成",
   step(g, "roll", die(1));
   assert.deepEqual(ids(g), ["upgrade:atk"]);
   step(g, "upgrade:atk");
-  assert.deepEqual([p.atk, p.act], [1, 2]);
+  assert.deepEqual([p.atk, p.act], [1, 3]);
   g.phase = "deathDiscard";
   step(g, "discard:c13");
   assert.equal(p.act, 1);
@@ -1160,16 +1346,16 @@ test("a disconnected player can resume a private choice or a wounded monster", (
   b.atk = 6;
   step(g, "roll", die(1));
   step(g, "attack", die(5));
-  assert.equal(g.battle.hp, 2);
+  assert.equal(g.battle.hp, 3);
   setOnline(g, "b", false);
   assert.equal(g.turn, "a");
-  assert.equal(g.board[18].hp, 2);
+  assert.equal(g.board[18].hp, 3);
   setOnline(g, "b", true);
   a.pos = 1;
   step(g, "roll", die(1));
   if (g.phase === "landing") step(g, "resolve");
   step(g, "heal");
-  assert.equal(g.battle.hp, 2);
+  assert.equal(g.battle.hp, 3);
   assert.equal(g.battle.actors[0], "b");
 });
 
@@ -1242,7 +1428,7 @@ function chooseAdventureAction(g, snapshot) {
   return priority.map(byId).find(Boolean) || options[0];
 }
 
-for (const count of [1, 4]) {
+for (const count of [1, 4, 5]) {
   test(
     "a full seeded adventure reaches final-boss victory with " +
       count +

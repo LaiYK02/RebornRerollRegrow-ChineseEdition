@@ -31,6 +31,7 @@ const paths = {
   fire: '<path d="M13 2c2 7-3 8 0 11l4-5c8 9 0 15-5 14S1 17 6 10l1 4c1-5 4-7 6-12z"/>',
   map: '<path d="m2 5 7-2 6 3 7-2v15l-7 2-6-3-7 2zM9 3v15m6-12v15"/>',
   key: '<circle cx="8" cy="9" r="5"/><path d="m12 12 9 9m-5-5 3-3m-1 5 3-3"/>',
+  lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 4v3"/>',
   chest: '<path d="M3 11V8q0-4 4-4h10q4 0 4 4v3zm0 0v9h18v-9M10 11v4h4v-4"/>',
   item: '<path d="M8 3h8M9 3v5l-5 7q-2 6 4 6h8q6 0 4-6l-5-7V3M7 14h11"/>',
   portal:
@@ -68,9 +69,15 @@ export function art(id, cls = "") {
     '.jpg">'
   );
 }
+export function textLines(value) {
+  return String(value ?? "")
+    .split(/\r?\n/)
+    .map((line) => esc(line))
+    .join("<br>");
+}
 export function cardEffects(card) {
   return [...new Set([card?.text, ...(card?.effects || [])].filter(Boolean))]
-    .map((effect) => "<span>" + esc(effect) + "</span>")
+    .map((effect) => "<span>" + textLines(effect) + "</span>")
     .join("");
 }
 export const palette = [
@@ -137,7 +144,7 @@ function knightShowcard() {
 }
 export function menu(profile, resume) {
   return (
-    '<section class="menu"><div class="hero-title"><h1><span class="pretitle">重生之</span><span class="title-main">我靠回城变强</span></h1><div class="subtitle"><em></em>区域网卡牌桌游 · 1–4 人<em></em></div></div><div class="camp">' +
+    '<section class="menu"><div class="hero-title"><h1><span class="pretitle">重生之</span><span class="title-main">我靠回城变强</span></h1><div class="subtitle"><em></em>区域网卡牌桌游 · 1–5 人<em></em></div></div><div class="camp">' +
     '<section class="setup paper"><div class="setup-title"><h2>' +
     icon("knight") +
     '冒险者营地</h2><span class="lan-dot">LAN</span></div><label class="field-label" for="pname">骑士名字</label><div class="name-field"><input id="pname" maxlength="16" autocomplete="off" value="' +
@@ -217,7 +224,7 @@ export function lobby(r) {
     button("leave", "离开房间", "door") +
     '</div><div class="lobby-content"><div><b>骑士席位　' +
     r.players.length +
-    ' / 4</b><div class="seats">' +
+    ' / 5</b><div class="seats">' +
     r.players
       .map(
         (p) =>
@@ -260,9 +267,10 @@ export function lobby(r) {
     "</div></div></section>"
   );
 }
-function slot(id, replacement) {
+function slot(id, replacement, locked) {
   return id
     ? '<button type="button" class="slot' +
+        (locked ? " gear-locked" : "") +
         (replacement
           ? ' is-replaceable" data-card-choice="' + esc(replacement.id)
           : '" data-detail="' + esc(id)) +
@@ -271,17 +279,33 @@ function slot(id, replacement) {
         '"' +
         (replacement
           ? ' aria-label="可替换 ' + esc(cards[id]?.name) + '"'
-          : "") +
+          : locked
+            ? ' aria-label="已封锁 ' + esc(cards[id]?.name) + '"'
+            : "") +
+        ' data-gear-slot="' +
+        esc(id) +
+        '"' +
         ">" +
         art(id) +
+        (locked ? '<i class="gear-lock-badge">' + icon("lock") + "</i>" : "") +
         "</button>"
     : '<span class="slot empty">·</span>';
 }
 function hud(p, me, b, active, replacements) {
+  const stats = b?.actors?.includes(p.id)
+    ? b.combatants?.[p.id] || p
+    : p.effectiveStats || p;
+  const sealed = b?.statusEntries?.[p.id]?.some(
+    (entry) => entry.id === "gearSeal",
+  );
   const gear =
     '<div class="gearline" aria-label="装备">' +
     Array.from({ length: Math.max(3, p.gear.length) }, (_, i) =>
-      slot(p.gear[i], replacements?.get(p.gear[i])),
+      slot(
+        p.gear[i],
+        replacements?.get(p.gear[i]),
+        sealed || p.locked?.includes(p.gear[i]),
+      ),
     ).join("") +
     "</div>";
   const stat = (symbol, value, label) =>
@@ -313,9 +337,9 @@ function hud(p, me, b, active, replacements) {
     (p.online ? "" : '<small class="seat-offline">离线</small>') +
     hearts(p.hp) +
     '</div></div><div class="hud-stats">' +
-    stat("sword", p.atk, "攻击") +
-    stat("shield", p.def, "防御") +
-    stat("step", p.act, "行动") +
+    stat("sword", stats.atk, "攻击") +
+    stat("shield", stats.def, "防御") +
+    stat("step", stats.act, "行动") +
     (me ? "" : stat("item", p.itemCount, "道具")) +
     "</div>" +
     gear +
@@ -367,23 +391,43 @@ const tilePictures = {
   duel: "duel",
 };
 export function board(g) {
+  const preview = g.movementPreview;
+  const route = new Set(preview?.path);
   return (
-    '<div class="board">' +
+    '<div class="board"' +
+    (preview ? " data-movement-preview" : "") +
+    ">" +
     g.board
       .map((t, i) => {
         const region = regions.find((r) => r[0] === t.biome) || regions[0];
         const kind = tiles[t.type];
         const residents = g.players.filter((p) => p.pos === i + 1);
         const reverse = Math.floor(i / 10) % 2;
+        const pos = i + 1;
+        const previewState =
+          pos === preview?.final && pos !== preview?.to
+            ? "final"
+            : pos === preview?.to
+              ? "destination"
+              : pos === preview?.from
+                ? "from"
+                : route.has(pos)
+                  ? "path"
+                  : "";
         const label =
-          i +
-          1 +
+          pos +
           " · " +
           region[1] +
           " · " +
           kind[0] +
           (t.banana ? " · 有香蕉皮" : "") +
-          (t.boss ? " · " + cards[t.boss].name : "");
+          (t.boss ? " · " + cards[t.boss].name : "") +
+          ({
+            from: " · 预计起点",
+            path: " · 预计经过",
+            destination: " · 预计停止位置",
+            final: " · 预计结算落点",
+          }[previewState] || "");
         const pic = tilePictures[t.type] || t.biome;
         const style =
           "--zone:" +
@@ -400,15 +444,17 @@ export function board(g) {
           (t.type === "legendaryChest" ? " legendary-chest" : "") +
           (t.type === "trap" ? " trap-space" : "") +
           '" data-tile="' +
-          (i + 1) +
-          '" style="' +
+          pos +
+          '"' +
+          (previewState ? ' data-preview="' + previewState + '"' : "") +
+          ' style="' +
           style +
           '" aria-label="' +
           esc(label) +
           '" title="' +
           esc(label) +
           '"><small class="tile-num">' +
-          (i + 1) +
+          pos +
           '</small><img class="terrain-art" alt="" src="./assets/tiles/' +
           pic +
           '.jpg"><i class="type-dot"></i>' +
@@ -459,7 +505,7 @@ export const dieCube =
   ).join("") +
   "</div></div>";
 
-function rollLine(r, label) {
+function rollLine(r, label, result = "") {
   return r
     ? "<span><b>" +
         label +
@@ -472,6 +518,7 @@ function rollLine(r, label) {
         esc(r.total) +
         "</strong>" +
         parityLabel(r.parity) +
+        (result ? '<em class="roll-outcome">' + esc(result) + "</em>" : "") +
         "</span>"
     : "";
 }
@@ -480,14 +527,19 @@ function monsterName(b) {
   return b.slimes ? "分裂史莱姆" : cards[b.form || b.monster]?.name || "怪物";
 }
 
-function combatCard(id, p, b, active, role = "") {
-  const monster = id === monsterFighter;
-  const name = monster ? monsterName(b) : p?.name || "骑士";
-  const stats = monster ? b : b.combatants?.[id] || p;
+function combatCard(id, p, b, active, role = "", enemy = null) {
+  const monster = id === monsterFighter || !!enemy;
+  const name = monster
+    ? cards[enemy?.form]?.name || monsterName(b)
+    : p?.name || "骑士";
+  const stats = monster ? enemy || b : b.combatants?.[id] || p;
   return (
     '<article class="combat-card' +
     (active ? " combat-current" : "") +
     (monster ? " combat-monster" : "") +
+    (enemy?.hp === 0 ? " combat-enemy-defeated" : "") +
+    (enemy?.targeted ? " combat-target" : "") +
+    (enemy?.attacking ? " combat-enemy-attacking" : "") +
     '" data-combatant="' +
     esc(id) +
     '"' +
@@ -502,7 +554,7 @@ function combatCard(id, p, b, active, role = "") {
         "</div>"
       : "") +
     "</header>" +
-    (monster && b.slimes
+    (monster && !enemy && b.slimes
       ? '<div class="slime-pair">' +
         ["左侧", "右侧"]
           .map((label, index) => {
@@ -532,9 +584,12 @@ function combatCard(id, p, b, active, role = "") {
           .join("") +
         "</div>"
       : (monster
-          ? art(b.form || b.monster, "battle-art")
+          ? art(enemy?.form || b.form || b.monster, "battle-art")
           : knight(p || {}, "battle-art token-knight")) +
-        hearts(monster ? b.hp : (p?.hp ?? 10), monster ? b.maxHp : 10)) +
+        hearts(
+          monster ? stats.hp : (p?.hp ?? 10),
+          monster ? stats.maxHp : 10,
+        )) +
     '<div class="combat-stats"><span>' +
     icon("sword") +
     " 攻击 " +
@@ -545,6 +600,7 @@ function combatCard(id, p, b, active, role = "") {
     esc(stats?.def ?? "—") +
     "</span></div>" +
     (monster &&
+    !enemy &&
     b.rageBonus !== undefined &&
     (b.rageBonus || b.atk !== b.baseAtk)
       ? '<small class="attack-breakdown">基础 ' +
@@ -552,7 +608,7 @@ function combatCard(id, p, b, active, role = "") {
         (b.rageBonus ? " · 蓄力 +" + esc(b.rageBonus) : "") +
         "</small>"
       : "") +
-    (monster && b.shieldMax
+    (monster && !enemy && b.shieldMax
       ? '<div class="boss-shield">' +
         icon("shield") +
         ' 额外护盾 <meter min="0" max="' +
@@ -569,6 +625,167 @@ function combatCard(id, p, b, active, role = "") {
   );
 }
 
+function combatRolls(b, id) {
+  const rollOwner = (roll, lane) =>
+    roll?.id === monsterFighter && lane != null
+      ? b.enemies?.[lane]?.id || roll.id
+      : roll?.id;
+  return (
+    '<div class="battle-rolls" data-roll-for="' +
+    esc(id) +
+    '">' +
+    (rollOwner(b.attackRoll, b.attackingEnemy) === id
+      ? rollLine(
+          b.attackRoll,
+          "攻击判定",
+          b.strikeResult === "成功攻击" ? b.strikeResult : "",
+        )
+      : "") +
+    (rollOwner(b.defenseRoll, b.targetIndex) === id
+      ? rollLine(
+          b.defenseRoll,
+          "防御判定",
+          b.strikeResult === "成功防御" ? b.strikeResult : "",
+        )
+      : "") +
+    "</div>"
+  );
+}
+
+function effectTarget(option, content, type = "") {
+  return option
+    ? '<button type="button" class="effect-target' +
+        (type ? " effect-group-target" : "") +
+        '" data-action="' +
+        esc(option.id) +
+        '"' +
+        (type ? ' data-effect-type="' + type + '"' : "") +
+        ">" +
+        content +
+        "</button>"
+    : "<p>" + content + "</p>";
+}
+
+function battleTargets(g) {
+  const menu = g.battle?.itemMenu || g.itemMenu;
+  return ["i12", "i13", "i14", "i15"].includes(menu?.card)
+    ? (g.actions || []).filter((a) => a.source && a.targetId != null)
+    : [];
+}
+
+function battleEffects(g, seats, options) {
+  const b = g.battle,
+    c = cards[b.form || b.monster];
+  const abilities =
+    b.effectEntries || (b.effects || []).map((label) => ({ label }));
+  const body = b.monster
+    ? '<section class="monster-effects"><h4>怪物能力</h4>' +
+      (abilities.length
+        ? abilities
+            .map((ability) =>
+              effectTarget(
+                options.find(
+                  (a) => a.source === "monster" && a.effectKey === ability.id,
+                ),
+                textLines(ability.label),
+              ),
+            )
+            .join("")
+        : '<small class="effect-empty">无</small>') +
+      "</section>"
+    : "";
+  const names = new Map(
+    seats
+      .filter(([id]) => id !== monsterFighter || !b.enemies?.length)
+      .map(([id]) => [
+        id,
+        g.players.find((p) => p.id === id)?.name || monsterName(b),
+      ]),
+  );
+  for (const [index, enemy] of (b.enemies || []).entries())
+    names.set(
+      enemy.id,
+      (index ? "右侧" : "左侧") +
+        " · " +
+        (cards[enemy.form]?.name || monsterName(b)),
+    );
+  const sections = [];
+  for (const id of names.keys()) {
+    const statuses =
+      b.statusEntries?.[id] ||
+      (b.statuses?.[id] || []).map((label) => ({
+        label,
+        type: "debuff",
+      }));
+    const statusChoices = options.filter(
+      (a) => a.source === "status" && a.targetId === id,
+    );
+    const groups = ["buff", "debuff"]
+      .map((type) => {
+        const entries = statuses.filter((status) => status.type === type);
+        const heading = type === "buff" ? "增益" : "减益";
+        const groupChoice = statusChoices.find(
+          (a) => a.effectType === type && !a.effectKey,
+        );
+        const groupLabels =
+          groupChoice?.detail || entries.map((status) => status.label);
+        return (
+          '<div class="effect-group" data-effect-type="' +
+          type +
+          '">' +
+          (!entries.length
+            ? "<small>" +
+              heading +
+              '</small><span class="effect-empty">无</span>'
+            : groupChoice
+              ? effectTarget(
+                  groupChoice,
+                  "<b>" +
+                    heading +
+                    "</b>" +
+                    groupLabels
+                      .map((label) => "<span>" + textLines(label) + "</span>")
+                      .join(""),
+                  type,
+                ) +
+                entries
+                  .filter((status) => !groupLabels.includes(status.label))
+                  .map((status) => effectTarget(null, textLines(status.label)))
+                  .join("")
+              : "<small>" +
+                heading +
+                "</small>" +
+                entries
+                  .map((status) =>
+                    effectTarget(
+                      statusChoices.find((a) => a.effectKey === status.id),
+                      textLines(status.label),
+                    ),
+                  )
+                  .join("")) +
+          "</div>"
+        );
+      })
+      .join("");
+    sections.push(
+      '<section data-effect-target="' +
+        esc(id) +
+        '"><h4>' +
+        esc(names.get(id)) +
+        "</h4>" +
+        groups +
+        "</section>",
+    );
+  }
+  return (
+    '<aside class="passives" aria-label="特殊效果"><h3>特殊效果</h3>' +
+    body +
+    sections.join("") +
+    (c?.quote ? '<p class="quote">' + textLines(c.quote) + "</p>" : "") +
+    "</aside>"
+  );
+}
+
 export function battle(g) {
   const b = g.battle,
     c = cards[b.form || b.monster],
@@ -581,50 +798,94 @@ export function battle(g) {
         [second, "挑战者"],
         [first, "擂主"],
       ];
-  const effects = (b.effects || [])
-    .map(
-      (e, i) =>
-        "<p><b>" + String(i + 1).padStart(2, "0") + "</b>　" + esc(e) + "</p>",
-    )
-    .join("");
-  const activeStates = Object.entries(b.statuses || {})
-    .filter(([, v]) => v.length)
-    .map(
-      ([id, v]) =>
-        "<p>" +
-        esc(g.players.find((p) => p.id === id)?.name || monsterName(b)) +
-        " · " +
-        esc(v.join("、")) +
-        "</p>",
-    )
-    .join("");
-  const passives =
-    effects +
-    activeStates +
-    (c?.quote ? '<p class="quote">' + esc(c.quote) + "</p>" : "");
+  const watchEnemy =
+    b.attackingEnemy != null &&
+    b.enemyAttackQueue?.length &&
+    b.enemyAttackCount;
+  const step = watchEnemy
+    ? b.enemyAttackCount - b.enemyAttackQueue.length + 1
+    : 0;
+  const options = battleTargets(g);
+  const battleSeat = ([id, role]) => {
+    if (id === monsterFighter && b.enemies?.length) {
+      return (
+        '<div class="enemy-line">' +
+        b.enemies
+          .map((enemy, index) => {
+            const lane = index ? "右侧" : "左侧";
+            const attacking = b.attackingEnemy === index;
+            const awaitingDefense = b.enemyAttackQueue?.includes(index);
+            const active =
+              g.actor === enemy.id || (current === monsterFighter && attacking);
+            const targeted =
+              enemy.hp > 0 &&
+              b.targetIndex === index &&
+              b.attackingEnemy == null;
+            const label =
+              lane +
+              (enemy.hp <= 0
+                ? " · 已击败"
+                : attacking
+                  ? " · 正在攻击"
+                  : awaitingDefense
+                    ? " · 待防御"
+                    : targeted
+                      ? " · 当前目标"
+                      : "");
+            return (
+              '<div class="combat-seat" data-enemy-lane="' +
+              index +
+              '">' +
+              combatCard(enemy.id, null, b, active, label, {
+                ...enemy,
+                targeted,
+                attacking,
+              }) +
+              combatRolls(b, enemy.id) +
+              "</div>"
+            );
+          })
+          .join("") +
+        "</div>"
+      );
+    }
+    return (
+      '<div class="combat-seat">' +
+      combatCard(
+        id,
+        g.players.find((p) => p.id === id),
+        b,
+        id === current,
+        role,
+      ) +
+      combatRolls(b, id) +
+      "</div>"
+    );
+  };
   return (
     '<section class="battle"><h2 class="kicker">' +
     esc(b.monster ? cards[b.monster]?.kind || c?.kind : "骑士决斗") +
     " · 第 " +
     esc(b.round) +
-    ' 轮</h2><div class="battle-layout"><div class="battle-field"><div class="combat-line">' +
+    " 轮" +
+    (watchEnemy
+      ? " · 防御第 " +
+        esc(step) +
+        " / " +
+        esc(b.enemyAttackCount) +
+        " 次（" +
+        (b.attackingEnemy === 0 ? "左侧" : "右侧") +
+        "）"
+      : "") +
+    '</h2><div class="battle-layout"><div class="battle-field"><div class="combat-line' +
+    (b.enemies?.length ? " combat-paired" : "") +
+    '">' +
     seats
-      .map(([id, role]) =>
-        combatCard(
-          id,
-          g.players.find((p) => p.id === id),
-          b,
-          id === current,
-          role,
-        ),
-      )
+      .map(battleSeat)
       .join('<span class="combat-divider">' + icon("duel") + "</span>") +
-    '</div><div class="battle-rolls">' +
-    rollLine(b.attackRoll, "攻击判定") +
-    rollLine(b.defenseRoll, "防御判定") +
-    '</div></div><aside class="passives" aria-label="特殊效果">' +
-    (passives ? "<h3>特殊效果</h3>" + passives : "") +
-    '</aside></div><div class="combat-effects" aria-live="polite"></div></section>'
+    "</div></div>" +
+    battleEffects(g, seats, options) +
+    '</div><div class="combat-effects" aria-live="polite"></div></section>'
   );
 }
 export function actionItem(action) {
@@ -674,9 +935,9 @@ function renderAction(a) {
         ? art(a.card)
         : "") +
     '<span class="choice-label">' +
-    esc(a.label) +
+    textLines(a.label) +
     (details && !a.label.includes(details)
-      ? "<small>" + esc(details) + "</small>"
+      ? "<small>" + textLines(details) + "</small>"
       : "") +
     "</span></button>"
   );
@@ -731,7 +992,9 @@ function handCards(me, items, menu, selected, replacements) {
           (replacement ? '" data-card-choice="' + esc(replacement.id) : "") +
           '" title="' +
           name +
-          '" style="--fan-angle:' +
+          '" style="--fan-index:' +
+          index +
+          ";--fan-angle:" +
           Math.max(-24, Math.min(24, offset * 6)) +
           "deg;--fan-drop:" +
           Math.min(19, offset * offset * 1.8) +
@@ -759,9 +1022,9 @@ function choiceControls(g, actions, menu, selected) {
       ? '<div class="choice-header"><b>' +
         esc(cards[card]?.name) +
         "</b>" +
-        (heading ? "<span>" + esc(heading) + "</span>" : "") +
+        (heading ? "<span>" + textLines(heading) + "</span>" : "") +
         (details
-          ? '<small class="choice-summary">' + esc(details) + "</small>"
+          ? '<small class="choice-summary">' + textLines(details) + "</small>"
           : "") +
         button(
           "inspectHand",
@@ -804,6 +1067,34 @@ function rewardPanel(offers, pending) {
   );
 }
 
+function equipmentTargetPanel(menu, choices) {
+  if (menu?.card !== "i13") return "";
+  const gear =
+    menu.stage === "confirm" && cards[menu.effectKey] ? menu.effectKey : null;
+  if (!gear && !choices.length) return "";
+  return (
+    '<section class="reward-panel equipment-targets" aria-labelledby="equipment-heading">' +
+    '<h2 id="equipment-heading">' +
+    (gear ? "确认封锁装备" : "选择要封锁的装备") +
+    '</h2><div class="reward-cards">' +
+    (gear
+      ? '<article class="reward-card pending-card">' +
+        cardSummary(gear) +
+        "</article>"
+      : choices
+          .map(
+            (option) =>
+              '<button type="button" class="reward-card" data-action="' +
+              esc(option.id) +
+              '">' +
+              cardSummary(option.effectKey) +
+              "</button>",
+          )
+          .join("")) +
+    "</div></section>"
+  );
+}
+
 export function game(r, solo, combatResolving = false, handSelection = null) {
   const g = r.game,
     me = g.players.find((p) => p.id === r.you),
@@ -812,6 +1103,7 @@ export function game(r, solo, combatResolving = false, handSelection = null) {
   const actions = combatResolving ? [] : g.actions || [];
   const surrender = actions.find((a) => a.id === "surrender");
   const menu = combatResolving ? null : g.itemMenu || g.battle?.itemMenu;
+  const inlineChoices = g.battle && !combatResolving ? battleTargets(g) : [];
   const items = actions.filter((a) => actionItem(a));
   const offers =
     g.phase === "offer" ? actions.filter((a) => a.id.startsWith("take:")) : [];
@@ -831,6 +1123,7 @@ export function game(r, solo, combatResolving = false, handSelection = null) {
     (a) =>
       a !== surrender &&
       !offers.includes(a) &&
+      !inlineChoices.includes(a) &&
       !a.id.startsWith("replace:") &&
       (menu || (selected ? actionItem(a) === selected.card : !actionItem(a))),
   );
@@ -881,7 +1174,11 @@ export function game(r, solo, combatResolving = false, handSelection = null) {
           : "") +
         "</div>"
       : g.battle
-        ? battle(g)
+        ? battle(combatResolving ? { ...g, actions: [] } : g) +
+          equipmentTargetPanel(
+            menu,
+            inlineChoices.filter((a) => a.source === "gear"),
+          )
         : rewards
           ? '<div class="reward-board" aria-hidden="true" inert>' +
             board(g) +
