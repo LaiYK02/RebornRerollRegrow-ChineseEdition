@@ -630,6 +630,17 @@ function checkStrikes(s) {
   return { hit: b.flip ? !hit : hit, margin, shield };
 }
 
+export function battleDiceReview(s) {
+  const b = s.battle;
+  const phase = b.phase === "surrenderConfirm" ? b.surrenderFrom : b.phase;
+  let result = null;
+  if (phase === "reaction") result = checkStrikes(s).hit ? "命中" : "未命中";
+  else if (phase === "equipmentCheck")
+    result = equipmentSuccess(b) ? "成功" : "失败";
+  else if (phase !== "attackReview") return null;
+  return { key: "battle:" + phase + ":" + b.actorId, result };
+}
+
 function resolveStrike(s) {
   const b = s.battle,
     actor = b.side,

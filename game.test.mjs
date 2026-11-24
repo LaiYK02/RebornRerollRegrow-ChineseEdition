@@ -28,6 +28,66 @@ function step(game, action, rng = () => 0) {
 const die = (n) => () => (n - 0.5) / 6;
 const ids = (g, id = actor(g)) => view(g, id).actions.map((a) => a.id);
 
+test("骰子确认标记跟随同一次判定，修改结果不换骰且确认后清空", () => {
+  const g = solo(),
+    [p] = g.players;
+  g.phase = "rest";
+  p.items = ["i01", "i19"];
+  const dice = () => view(g, p.id).dice;
+  choose(g, "rest", die(4));
+  const initial = dice();
+  assert.equal(initial.review.result, "失败");
+  choose(g, "use:i01");
+  assert.deepEqual(dice().values, initial.values);
+  assert.equal(dice().rollId, initial.rollId);
+  assert.deepEqual(dice().review, { key: initial.review.key, result: "成功" });
+  choose(g, "use:i19");
+  assert.deepEqual(dice().review, { key: initial.review.key, result: "成功" });
+  choose(g, "cancel");
+  choose(g, "check:accept");
+  assert.equal(dice().review, null);
+});
+
+test("决斗骰子确认标记随攻防阶段和行动者切换", () => {
+  const g = pair(),
+    [challenger, defender] = g.players;
+  challenger.pos = 6;
+  defender.pos = 7;
+  step(g, "roll", die(1));
+  const dice = () => view(g, challenger.id).dice;
+  choose(g, "attack", die(6));
+  assert.equal(dice().review.key, "battle:attackReview:b");
+  choose(g, "confirmAttack");
+  assert.equal(dice().review, null);
+  choose(g, "defend", die(1));
+  const roll = dice();
+  assert.deepEqual(roll.review, { key: "battle:reaction:b", result: "命中" });
+  choose(g, "confirm");
+  assert.equal(dice().rollId, roll.rollId);
+  assert.equal(dice().review.key, "battle:reaction:a");
+  choose(g, "confirm");
+  assert.equal(dice().review, null);
+});
+
+test("奖励卡标出现有物品空间和互斥装备需要替换的情况", () => {
+  const g = solo(),
+    [p] = g.players;
+  g.phase = "offer";
+  g.pending = { ids: ["i02", "c08", "l01"], canPass: true };
+  p.items = ["i01", "i03", "i04", "i05", "i06"];
+  p.gear = ["c07", "c01"];
+  const deck = () => view(g, p.id).actions.filter((entry) => entry.card);
+  assert.deepEqual(
+    deck().map((entry) => Boolean(entry.needsReplacement)),
+    [true, true, false],
+  );
+  p.gear.push("l16");
+  assert.deepEqual(
+    deck().map((entry) => Boolean(entry.needsReplacement)),
+    [false, true, true],
+  );
+});
+
 test("动作耗尽时自动交棒，但可使用的道具会保留手动结束选项", () => {
   const g = pair();
   g.phase = "rest";

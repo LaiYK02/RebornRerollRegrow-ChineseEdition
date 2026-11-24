@@ -68,6 +68,11 @@ export function art(id, cls = "") {
     '.jpg">'
   );
 }
+export function cardEffects(card) {
+  return [...new Set([card?.text, ...(card?.effects || [])].filter(Boolean))]
+    .map((effect) => "<span>" + esc(effect) + "</span>")
+    .join("");
+}
 export const palette = [
   "#348f98",
   "#4f83cc",
@@ -255,22 +260,28 @@ export function lobby(r) {
     "</div></div></section>"
   );
 }
-function slot(id) {
+function slot(id, replacement) {
   return id
-    ? '<button class="slot" data-detail="' +
-        esc(id) +
+    ? '<button type="button" class="slot' +
+        (replacement
+          ? ' is-replaceable" data-card-choice="' + esc(replacement.id)
+          : '" data-detail="' + esc(id)) +
         '" title="' +
         esc(cards[id]?.name) +
-        '">' +
+        '"' +
+        (replacement
+          ? ' aria-label="可替换 ' + esc(cards[id]?.name) + '"'
+          : "") +
+        ">" +
         art(id) +
         "</button>"
     : '<span class="slot empty">·</span>';
 }
-function hud(p, me, b, active) {
+function hud(p, me, b, active, replacements) {
   const gear =
     '<div class="gearline" aria-label="装备">' +
     Array.from({ length: Math.max(3, p.gear.length) }, (_, i) =>
-      slot(p.gear[i]),
+      slot(p.gear[i], replacements?.get(p.gear[i])),
     ).join("") +
     "</div>";
   const stat = (symbol, value, label) =>
@@ -453,7 +464,10 @@ function rollLine(r, label) {
     ? "<span><b>" +
         label +
         "</b> " +
-        (r.dice?.length ? r.dice.join(" + ") + " → " : "") +
+        (r.dice?.length
+          ? (r.dice.length > 6 ? r.dice.length + " 枚" : r.dice.join(" + ")) +
+            " → "
+          : "") +
         "<strong>" +
         esc(r.total) +
         "</strong>" +
@@ -584,12 +598,16 @@ export function battle(g) {
         "</p>",
     )
     .join("");
+  const passives =
+    effects +
+    activeStates +
+    (c?.quote ? '<p class="quote">' + esc(c.quote) + "</p>" : "");
   return (
     '<section class="battle"><h2 class="kicker">' +
     esc(b.monster ? cards[b.monster]?.kind || c?.kind : "骑士决斗") +
     " · 第 " +
     esc(b.round) +
-    ' 轮</h2><div class="combat-line">' +
+    ' 轮</h2><div class="battle-layout"><div class="battle-field"><div class="combat-line">' +
     seats
       .map(([id, role]) =>
         combatCard(
@@ -601,14 +619,12 @@ export function battle(g) {
         ),
       )
       .join('<span class="combat-divider">' + icon("duel") + "</span>") +
-    '</div><div class="combat-effects" aria-live="polite"></div><div class="battle-rolls">' +
+    '</div><div class="battle-rolls">' +
     rollLine(b.attackRoll, "攻击判定") +
     rollLine(b.defenseRoll, "防御判定") +
-    '</div><div class="passives">' +
-    effects +
-    activeStates +
-    (c?.quote ? '<p class="quote">' + esc(c.quote) + "</p>" : "") +
-    "</div></section>"
+    '</div></div><aside class="passives" aria-label="特殊效果">' +
+    (passives ? "<h3>特殊效果</h3>" + passives : "") +
+    '</aside></div><div class="combat-effects" aria-live="polite"></div></section>'
   );
 }
 export function actionItem(action) {
@@ -647,7 +663,9 @@ function renderAction(a) {
   return (
     '<button type="button" class="choice-action' +
     style +
-    '" data-action="' +
+    (a.id === "decline" && a.card
+      ? '" data-card-choice="'
+      : '" data-action="') +
     esc(a.id) +
     '">' +
     (glyph
@@ -664,7 +682,19 @@ function renderAction(a) {
   );
 }
 
-function handCards(me, items, menu, selected) {
+function cardSummary(id) {
+  const card = cards[id];
+  return (
+    art(id) +
+    '<strong class="card-name">' +
+    esc(card?.name) +
+    '</strong><span class="card-effects">' +
+    cardEffects(card) +
+    "</span>"
+  );
+}
+
+function handCards(me, items, menu, selected, replacements) {
   return (
     '<div class="item-hand' +
     (me.items.length > 8 ? " many-cards" : "") +
@@ -673,16 +703,23 @@ function handCards(me, items, menu, selected) {
     ">" +
     me.items
       .map((card, index) => {
-        const usable = menu
-          ? menu.card === card
-          : items.some((option) => actionItem(option) === card);
+        const replacement = replacements.get(card);
+        const usable =
+          replacement ||
+          (menu
+            ? menu.card === card
+            : items.some((option) => actionItem(option) === card));
         const active = menu
           ? card === menu.card && me.items.indexOf(card) === index
           : selected?.index === index;
         const offset = index - (me.items.length - 1) / 2;
+        const name = esc(cards[card]?.name);
+        const label =
+          name + (replacement ? " · 可替换" : usable ? "" : " · 当前只可查看");
         return (
           '<button type="button" class="hand-card ' +
           (usable ? "is-usable" : "is-unavailable") +
+          (replacement ? " is-replaceable" : "") +
           '" data-hand-item="' +
           esc(card) +
           '" data-item-index="' +
@@ -690,19 +727,17 @@ function handCards(me, items, menu, selected) {
           '" aria-pressed="' +
           active +
           '" aria-label="' +
-          esc(cards[card]?.name) +
-          (usable ? "" : " · 当前只可查看") +
+          label +
+          (replacement ? '" data-card-choice="' + esc(replacement.id) : "") +
           '" title="' +
-          esc(cards[card]?.name) +
+          name +
           '" style="--fan-angle:' +
           Math.max(-24, Math.min(24, offset * 6)) +
           "deg;--fan-drop:" +
           Math.min(19, offset * offset * 1.8) +
           'px">' +
-          art(card) +
-          "<span>" +
-          esc(cards[card]?.name) +
-          "</span></button>"
+          cardSummary(card) +
+          "</button>"
         );
       })
       .join("") +
@@ -710,14 +745,12 @@ function handCards(me, items, menu, selected) {
   );
 }
 
-function choiceControls(g, actions, menu, selected, combatResolving) {
+function choiceControls(g, actions, menu, selected) {
   const card = menu?.card || selected?.card;
   const details = detailsText(menu?.detail);
   const heading = menu?.summary || menu?.target;
   const surrender = g.battle?.phase === "surrenderConfirm";
-  const diceNote =
-    !combatResolving && g.dice?.values?.length && !card && !surrender;
-  if (!actions.length && !diceNote && !card) return "";
+  if (!actions.length && !card) return "";
   return (
     '<div class="actions' +
     (card || surrender ? " options-open" : "") +
@@ -746,23 +779,28 @@ function choiceControls(g, actions, menu, selected, combatResolving) {
     (selected
       ? button("cancelHand", "取消", "close", "choice-action choice-cancel")
       : "") +
-    "</div>" +
-    (diceNote
-      ? '<small class="dice-read" title="' +
-        esc(g.dice.values.join(" + ")) +
-        '">' +
-        icon("dice") +
-        " " +
-        esc(g.dice.label) +
-        " · " +
-        (g.dice.values.length <= 8
-          ? g.dice.values.join(" + ") + " → "
-          : g.dice.values.length + " 枚 → ") +
-        esc(g.dice.total) +
-        parityLabel(g.dice.parity) +
-        "</small>"
-      : "") +
-    "</div>"
+    "</div></div>"
+  );
+}
+
+function rewardPanel(offers, pending) {
+  const heading = pending ? "选择要替换的卡牌" : "选择一张奖励牌";
+  const showCard = (action) =>
+    '<button type="button" class="reward-card" data-card-choice="' +
+    esc(action.id) +
+    '">' +
+    cardSummary(action.card) +
+    "</button>";
+  return (
+    '<section class="reward-panel" aria-labelledby="reward-heading"><h2 id="reward-heading">' +
+    heading +
+    '</h2><div class="reward-cards">' +
+    (pending
+      ? '<article class="reward-card pending-card">' +
+        cardSummary(pending.card) +
+        "</article>"
+      : offers.map(showCard).join("")) +
+    "</div></section>"
   );
 }
 
@@ -775,6 +813,13 @@ export function game(r, solo, combatResolving = false, handSelection = null) {
   const surrender = actions.find((a) => a.id === "surrender");
   const menu = combatResolving ? null : g.itemMenu || g.battle?.itemMenu;
   const items = actions.filter((a) => actionItem(a));
+  const offers =
+    g.phase === "offer" ? actions.filter((a) => a.id.startsWith("take:")) : [];
+  const pending =
+    g.phase === "replace" ? actions.find((a) => a.id === "decline") : null;
+  const replacements = new Map(
+    actions.filter((a) => a.id.startsWith("replace:")).map((a) => [a.card, a]),
+  );
   const selected =
     handSelection &&
     !menu &&
@@ -785,8 +830,11 @@ export function game(r, solo, combatResolving = false, handSelection = null) {
   const visibleActions = actions.filter(
     (a) =>
       a !== surrender &&
+      !offers.includes(a) &&
+      !a.id.startsWith("replace:") &&
       (menu || (selected ? actionItem(a) === selected.card : !actionItem(a))),
   );
+  const rewards = offers.length || pending ? rewardPanel(offers, pending) : "";
   const opponents = g.players.filter((p) => p.id !== r.you);
   const side = (right) =>
     opponents
@@ -834,7 +882,12 @@ export function game(r, solo, combatResolving = false, handSelection = null) {
         "</div>"
       : g.battle
         ? battle(g)
-        : board(g)) +
+        : rewards
+          ? '<div class="reward-board" aria-hidden="true" inert>' +
+            board(g) +
+            "</div>" +
+            rewards
+          : board(g)) +
     '</div><aside class="seat-rail seat-right" aria-label="其他骑士">' +
     side(true) +
     '</aside></div><footer class="game-dock">' +
@@ -855,12 +908,10 @@ export function game(r, solo, combatResolving = false, handSelection = null) {
         chat(r, false) +
         "</div></details>") +
     '</div><div class="hand-dock">' +
-    (!win
-      ? choiceControls(g, visibleActions, menu, selected, combatResolving)
-      : "") +
-    handCards(me, items, menu, selected) +
+    (!win ? choiceControls(g, visibleActions, menu, selected) : "") +
+    handCards(me, items, menu, selected, replacements) +
     '<div class="own-hud">' +
-    hud(me, true, g.battle, me.id === g.actor) +
+    hud(me, true, g.battle, me.id === g.actor, replacements) +
     "</div></div>" +
     '<div class="exit-dock">' +
     (g.battle?.monster && !win

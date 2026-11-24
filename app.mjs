@@ -4,6 +4,7 @@ import {
   esc,
   icon,
   art,
+  cardEffects,
   palette,
   regions,
   tiles,
@@ -63,6 +64,7 @@ let snapshot = "",
   playback = null,
   shownWinner = null,
   diceAnimation = null,
+  reviewedDice = null,
   handSelection = null,
   reminderTimer,
   reminderKey = "",
@@ -136,16 +138,28 @@ function soundIcon() {
 function modal(title, content, wide = false, key = "") {
   if (!overlay.firstChild) previousFocus = document.activeElement;
   modalName = key;
+  const cardLayout = key === "card";
+  const dismiss = button(
+    "close",
+    "",
+    "close",
+    cardLayout ? "card-close" : "mini",
+    'aria-label="关闭"',
+  );
+  const heading = cardLayout
+    ? dismiss
+    : '<div class="panel-heading"><h2>' +
+      esc(title) +
+      "</h2>" +
+      dismiss +
+      "</div>";
   overlay.innerHTML =
     '<section role="dialog" aria-modal="true" aria-label="' +
     esc(title) +
     '" class="modal paper ' +
-    (wide ? "wide" : "") +
-    '"><div class="panel-heading"><h2>' +
-    esc(title) +
-    "</h2>" +
-    button("close", "", "close", "mini", 'aria-label="关闭"') +
-    "</div>" +
+    (cardLayout ? "card-inspection" : wide ? "wide" : "") +
+    '">' +
+    heading +
     content +
     "</section>";
   overlay.querySelector("input,button")?.focus({ preventScroll: true });
@@ -201,7 +215,7 @@ function atlas(filter = "全部") {
     "atlas",
   );
 }
-function detail(id, back = false, actionId, showActions = true) {
+function detail(id, back = false, confirm = null) {
   const c =
     cards[id] ||
     (id === "knight"
@@ -216,50 +230,69 @@ function detail(id, back = false, actionId, showActions = true) {
         }
       : null);
   if (!c) return;
-  const actions = showActions
-    ? (room?.game?.actions || []).filter(
-        (a) => a.card === id && (!actionId || a.id === actionId),
-      )
-    : [];
   modal(
     c.name,
-    '<div class="entry-detail">' +
-      art(id) +
-      '<div><span class="kicker">' +
+    '<div class="entry-detail"><span class="kicker">' +
       esc(c.kind) +
-      "</span>" +
+      '</span><div class="card-detail-art">' +
+      art(id) +
+      "</div><h2>" +
+      esc(c.name) +
+      "</h2>" +
       (c.hp
         ? "<p>" +
           hearts(c.hp, c.hp) +
           "<br>攻击 " +
-          (id === "final" ? "对手防御 × 3" : c.atk) +
+          (id === "final" ? "对手防御 × 4" : c.atk) +
           " · 防御 " +
-          (id === "final" ? "对手攻击 × 3" : c.def) +
+          (id === "final" ? "对手攻击 × 4" : c.def) +
           "</p>"
         : "") +
-      (c.text ? "<p>" + esc(c.text) + "</p>" : "") +
-      (c.effects || [])
-        .filter((e) => e !== c.text)
-        .map((e, i) => "<p>" + ["①", "②", "③"][i] + " " + esc(e) + "</p>")
-        .join("") +
-      "</div></div>" +
+      '<div class="card-effects">' +
+      cardEffects(c) +
+      "</div>" +
       (c.quote ? '<p class="quote">' + esc(c.quote) + "</p>" : "") +
-      (actions.length
-        ? '<div class="action-row">' +
-          actions
-            .map(
-              (a) =>
-                '<button class="mini" data-action="' +
-                esc(a.id) +
-                '">' +
-                esc(a.label) +
-                "</button>",
-            )
-            .join("") +
-          "</div>"
+      "</div>" +
+      (confirm
+        ? '<div class="card-confirmation">' +
+          (confirm.note ? "<p>" + esc(confirm.note) + "</p>" : "") +
+          '<div class="action-row"><button type="button" class="cta primary" data-action="' +
+          esc(confirm.id) +
+          '">' +
+          esc(confirm.label) +
+          "</button>" +
+          button("close", "取消", "", "soft") +
+          "</div></div>"
         : "") +
       (back ? button("backAtlas", "返回图鉴", "", "soft") : ""),
+    false,
+    "card",
   );
+}
+function confirmCardChoice(id) {
+  const actions = room?.game?.actions || [];
+  const action = actions.find((a) => a.id === id);
+  if (!action?.card || busy || controlsLocked()) return;
+  const pending = actions.find((a) => a.id === "decline");
+  const verb = id.split(":")[0];
+  const labels = {
+    replace: "确认替换",
+    decline: "确认放弃",
+    discard: "确认弃置",
+  };
+  const note =
+    verb === "replace" && pending
+      ? "用「" + cards[pending.card].name + "」替换这张卡牌。"
+      : action.needsReplacement
+        ? "需先选择一张已有卡牌替换，才能领取。"
+        : "";
+  detail(action.card, false, {
+    id,
+    label:
+      labels[verb] ||
+      (action.needsReplacement ? "选择要替换的卡牌" : "确认领取"),
+    note,
+  });
 }
 async function rules() {
   modal("游戏规则", '<div class="rules">正在读取规则…</div>', true, "rules");
@@ -477,6 +510,7 @@ function renderRoom(displayGame = room?.game, combatResolving = false) {
   const focused = document.activeElement,
     focusPanel = focused?.closest(".field-panel summary")?.parentElement.id,
     focusHand = focused?.closest(".hand-card")?.dataset.itemIndex,
+    focusCard = focused?.closest("[data-card-choice]")?.dataset.cardChoice,
     chatInput = $("#chat input"),
     textValue = chatInput?.value,
     focus = focused === chatInput,
@@ -485,6 +519,7 @@ function renderRoom(displayGame = room?.game, combatResolving = false) {
     chatAtEnd = atEnd(oldChat),
     scroll = oldChat?.scrollTop,
     logTop = $(".logbox")?.scrollTop,
+    rewardTop = $(".reward-panel")?.scrollTop,
     handScroll = $(".item-hand")?.scrollLeft,
     openPanels = [...app.querySelectorAll(".field-panel[open]")].map(
       (panel) => panel.id,
@@ -500,12 +535,15 @@ function renderRoom(displayGame = room?.game, combatResolving = false) {
   if (controlsLocked()) {
     $(".action-row")?.setAttribute("inert", "");
     $(".exit-dock")?.setAttribute("inert", "");
+    $(".reward-panel")?.setAttribute("inert", "");
   }
   for (const id of openPanels) {
     const panel = document.getElementById(id);
     if (panel) panel.open = true;
   }
   if (handScroll && $(".item-hand")) $(".item-hand").scrollLeft = handScroll;
+  if (rewardTop && $(".reward-card[data-card-choice]"))
+    $(".reward-panel").scrollTop = rewardTop;
   document.body.classList.toggle("playing", !!room.game);
   const input = $("#chat input");
   if (input && textValue) input.value = textValue;
@@ -519,6 +557,10 @@ function renderRoom(displayGame = room?.game, combatResolving = false) {
       ?.focus({ preventScroll: true });
   } else if (focusHand !== undefined) {
     $('.hand-card[data-item-index="' + focusHand + '"]')?.focus({
+      preventScroll: true,
+    });
+  } else if (focusCard) {
+    $('[data-card-choice="' + CSS.escape(focusCard) + '"]')?.focus({
       preventScroll: true,
     });
   }
@@ -542,13 +584,38 @@ function cancelPlayback() {
   playback?.abort();
   playback = null;
   visualQueue.length = 0;
-  diceAnimation?.();
+  diceAnimation?.close();
+  reviewedDice = null;
   handSelection = null;
   combatSequence = 0;
   shownWinner = null;
 }
 function controlsLocked() {
   return !!playback;
+}
+
+function sameDiceResult(previous, next) {
+  return (
+    previous?.values?.length === next.values.length &&
+    previous.label === next.label &&
+    previous.total === next.total &&
+    previous.parity === next.parity &&
+    previous.review?.result === next.review?.result &&
+    previous.values.every((value, index) => value === next.values[index])
+  );
+}
+
+function nextDiceReview(previous, next, sameGame) {
+  if (!next?.review?.key || !next.values?.length) return null;
+  if (!sameGame || next.rollId !== previous?.rollId) return next;
+  if (next.review.key !== previous?.review?.key) return null;
+  return reviewedDice || !sameDiceResult(previous, next) ? next : null;
+}
+
+function renderDiceReview() {
+  if (!reviewedDice) diceAnimation?.close();
+  else if (diceAnimation) diceAnimation.update(reviewedDice);
+  else createDicePanel(reviewedDice);
 }
 
 function setRoom(next) {
@@ -575,14 +642,16 @@ function setRoom(next) {
     sameGame && next.game.movementSequence > old.game.movementSequence
       ? next.game.movements
       : [];
+  const dice = next.game?.dice;
+  reviewedDice = nextDiceReview(old?.game?.dice, dice, sameGame);
   if (
     sameGame &&
     !reduced &&
-    next.game.dice?.values?.length &&
-    next.game.dice.rollId !== old.game.dice?.rollId
+    dice?.values?.length &&
+    dice.rollId !== old.game.dice?.rollId
   ) {
     visualQueue.push({
-      dice: next.game.dice,
+      dice,
       game: strikes.length ? old.game : next.game,
       resolving: strikes.length > 0,
     });
@@ -604,6 +673,7 @@ function setRoom(next) {
     void playVisuals();
   } else {
     renderLiveRoom();
+    renderDiceReview();
   }
   scheduleTurnReminder(next);
   if (strikes.length || alreadyPlaying) return;
@@ -689,10 +759,11 @@ async function playVisuals() {
         await animateDice(job.dice, signal);
         focusDice = true;
       } else if (job.strike) {
-        diceAnimation?.();
+        diceAnimation?.close();
         await animateStrike(job, signal);
         focusDice = false;
       } else {
+        diceAnimation?.close();
         renderRoom(job.game);
         await cameraMove(job.game, job.moves, signal);
         focusDice = false;
@@ -702,41 +773,47 @@ async function playVisuals() {
     if (playback === controller) {
       playback = null;
       renderLiveRoom();
+      renderDiceReview();
       if (
         focusDice &&
+        reviewedDice &&
         room?.game?.actor === room?.you &&
         document.activeElement === document.body
       )
         $(
-          ".actions [data-action^='confirm'], .actions [data-action='check:accept']",
+          ".actions :is([data-action='confirm'], [data-action='confirmAttack'], [data-action='confirmEquipment'], [data-action='check:accept'])",
         )?.focus({ preventScroll: true });
     }
   }
 }
 
-async function animateDice(dice, signal) {
-  diceAnimation?.();
+function createDicePanel(dice, rolling = false) {
+  diceAnimation?.close();
   const panel = document.createElement("div");
   panel.className = "dice-animation";
   panel.innerHTML =
     '<div class="rolling-faces" aria-hidden="true"></div><b role="status"></b>' +
     '<div class="dice-pager" hidden><button type="button" aria-label="上一页骰子">‹</button>' +
-    '<span></span><button type="button" aria-label="下一页骰子">›</button>' +
-    '<button type="button" aria-label="关闭骰子结果">×</button></div>';
+    '<span></span><button type="button" aria-label="下一页骰子">›</button></div>';
   const heading = panel.querySelector("b");
   const faces = panel.querySelector(".rolling-faces");
   const pager = panel.querySelector(".dice-pager");
-  const [previous, next, closeDice] = pager.querySelectorAll("button");
+  const [previous, next] = pager.querySelectorAll("button");
   const pageNumber = pager.querySelector("span");
   let pageSize = 1,
     page = 0,
     tick = 0,
-    revealed = false,
-    dismiss;
+    revealed = !rolling;
   const pageCount = () => Math.ceil(dice.values.length / pageSize);
-  function scheduleDismiss() {
-    clearTimeout(dismiss);
-    if (pageCount() === 1) dismiss = setTimeout(() => diceAnimation?.(), 710);
+  function describe() {
+    const result = dice.review?.result;
+    heading.textContent = revealed
+      ? dice.label +
+        " · " +
+        dice.total +
+        parityLabel(dice.parity) +
+        (result ? " · " + result : "")
+      : dice.label + " · 掷骰中";
   }
   const show = () => {
     for (let i = 0; i < faces.children.length; i++) {
@@ -766,12 +843,14 @@ async function animateDice(dice, signal) {
       Math.max(1, Math.floor(innerWidth * 0.94) - 40),
       Math.max(1, Math.floor(innerHeight * 0.49)),
     );
-    page = Math.floor((page * pageSize) / capacity);
+    page = Math.min(
+      Math.floor((page * pageSize) / capacity),
+      Math.ceil(dice.values.length / capacity) - 1,
+    );
     pageSize = capacity;
     faces.style.setProperty("--die-size", size + "px");
     faces.style.inlineSize = columns * size + "px";
     drawPage();
-    if (revealed) scheduleDismiss();
   }
   previous.onclick = () => {
     page--;
@@ -781,33 +860,52 @@ async function animateDice(dice, signal) {
     page++;
     drawPage();
   };
-  closeDice.onclick = () => diceAnimation?.();
   fit();
-  heading.textContent = dice.label + " · 掷骰中";
-  app.classList.add("rolling-dice");
+  describe();
+  panel.classList.toggle("revealed", revealed);
+  app.classList.toggle("rolling-dice", rolling);
   document.body.append(panel);
   window.addEventListener("resize", fit);
-  const rolling = setInterval(() => {
-    tick++;
-    show();
-  }, 75);
-  diceAnimation = () => {
-    clearInterval(rolling);
-    clearTimeout(dismiss);
-    window.removeEventListener("resize", fit);
-    panel.remove();
-    app.classList.remove("rolling-dice");
-    diceAnimation = null;
+  const tumbling = rolling
+    ? setInterval(() => {
+        tick++;
+        show();
+      }, 75)
+    : null;
+  const animation = {
+    reveal() {
+      clearInterval(tumbling);
+      revealed = true;
+      drawPage();
+      describe();
+      panel.classList.add("revealed");
+      app.classList.remove("rolling-dice");
+    },
+    update(nextDice) {
+      const newRoll = dice.rollId !== nextDice.rollId;
+      if (!newRoll && sameDiceResult(dice, nextDice)) return;
+      if (newRoll) page = 0;
+      dice = nextDice;
+      fit();
+      describe();
+    },
+    close() {
+      clearInterval(tumbling);
+      window.removeEventListener("resize", fit);
+      panel.remove();
+      app.classList.remove("rolling-dice");
+      diceAnimation = null;
+    },
   };
+  diceAnimation = animation;
+  return animation;
+}
+
+async function animateDice(dice, signal) {
+  const animation = createDicePanel(dice, true);
   if (!(await pauseVisual(740, signal))) return;
-  clearInterval(rolling);
-  revealed = true;
-  drawPage();
-  heading.textContent =
-    dice.label + " · " + dice.total + parityLabel(dice.parity);
-  panel.classList.add("revealed");
-  app.classList.remove("rolling-dice");
-  scheduleDismiss();
+  animation.reveal();
+  if (!dice.review) await pauseVisual(160, signal);
 }
 
 function effectAt(layer, className, bounds, content = "") {
@@ -1108,7 +1206,6 @@ async function submitAction(actionId) {
     !room?.game?.actions.some((a) => a.id === actionId)
   )
     return;
-  diceAnimation?.();
   handSelection = null;
   tone(495);
   close();
@@ -1132,6 +1229,10 @@ async function click(e) {
       atlas(d.filter);
       return;
     }
+    if (d.cardChoice) {
+      confirmCardChoice(d.cardChoice);
+      return;
+    }
     if (d.handItem) {
       if (controlsLocked() || busy) return;
       const card = d.handItem;
@@ -1140,7 +1241,7 @@ async function click(e) {
       const menu = g?.itemMenu || g?.battle?.itemMenu;
       const options = (g?.actions || []).filter((a) => actionItem(a) === card);
       if (menu || !options.length) {
-        detail(card, false, undefined, false);
+        detail(card);
       } else if (options.length === 1 && options[0].opensItemMenu) {
         await submitAction(options[0].id);
         $(".actions [data-action]")?.focus({ preventScroll: true });
@@ -1193,14 +1294,11 @@ async function click(e) {
     if (d.action && controlsLocked()) return;
     if (
       d.action &&
-      ["offer", "replace", "deathDiscard"].includes(room?.game?.phase) &&
+      room?.game?.phase === "deathDiscard" &&
       !overlay.firstChild
     ) {
-      const offer = room.game.actions.find((a) => a.id === d.action);
-      if (offer?.card) {
-        detail(offer.card, false, offer.id);
-        return;
-      }
+      confirmCardChoice(d.action);
+      return;
     }
     if (d.action) {
       await submitAction(d.action);
@@ -1214,7 +1312,7 @@ async function click(e) {
       return;
     }
     if (k === "inspectHand") {
-      detail(d.card, false, undefined, false);
+      detail(d.card);
       return;
     }
     if (k === "cancelHand") {

@@ -2,6 +2,7 @@ import { cards, monsterProfile } from "./cards.mjs";
 import {
   startBattle,
   battleActions,
+  battleDiceReview,
   actBattle,
   playerStats as battlePlayerStats,
   recordDice,
@@ -482,17 +483,19 @@ function conflictingCharm(p, card) {
   return other && p.gear.includes(other) ? other : null;
 }
 
+function needsReplacement(p, card) {
+  return card.startsWith("i")
+    ? p.items.length >= itemLimit(p)
+    : p.gear.length >= 3 || Boolean(conflictingCharm(p, card));
+}
+
 function receive(game, p, card, replacing) {
   const isItem = card.startsWith("i");
   if (replacing) {
     if (isItem) removeOne(p.items, replacing);
     else removeGear(game, p, replacing);
   }
-  if (
-    isItem
-      ? p.items.length >= itemLimit(p)
-      : p.gear.length >= 3 || conflictingCharm(p, card)
-  ) {
+  if (needsReplacement(p, card)) {
     phase(game, "replace", { card }, p.id);
     return;
   }
@@ -1163,9 +1166,10 @@ function actions(game, id) {
         break;
       case "offer":
         return [
-          ...game.pending.ids.map((card) =>
-            action("take:" + card, nameOf(card), card),
-          ),
+          ...game.pending.ids.map((card) => ({
+            ...action("take:" + card, nameOf(card), card),
+            ...(needsReplacement(p, card) ? { needsReplacement: true } : {}),
+          })),
           ...(game.pending.canPass ? [action("passOffer", "放弃领取")] : []),
         ];
       case "replace": {
@@ -1452,6 +1456,17 @@ function describe(game, viewer) {
   return who + " · " + labels[game.phase];
 }
 
+function diceReview(game) {
+  if (game.battle) return battleDiceReview(game);
+  const check = game.check;
+  if (!check) return null;
+  const outcome = checkOutcome(check);
+  return {
+    key: "board:" + game.actor + ":" + check.kind,
+    result: outcome === null ? null : outcome ? "成功" : "失败",
+  };
+}
+
 export function view(game, id) {
   const b = game.battle;
   let battle = null;
@@ -1539,7 +1554,7 @@ export function view(game, id) {
     winner: game.winner,
     log: game.log.slice(-120),
     prompt: describe(game, id),
-    dice: game.dice,
+    dice: game.dice ? { ...game.dice, review: diceReview(game) } : null,
     movementSequence: game.sequence,
     movements: game.movements || [],
   });

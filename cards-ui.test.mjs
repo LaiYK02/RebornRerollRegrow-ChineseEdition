@@ -80,6 +80,63 @@ test("手牌显示自己的所有物品，只有合法物品发亮，选项留�
   );
 });
 
+test("奖励牌在场中显示卡图、名称和完整效果，先打开确认", () => {
+  const room = makeGameRoom({
+    phase: "offer",
+    actions: [
+      { id: "take:i02", label: cards.i02.name, card: "i02" },
+      { id: "take:l16", label: cards.l16.name, card: "l16" },
+      { id: "passOffer", label: "放弃领取" },
+    ],
+  });
+  const html = renderGame(room, false);
+  assert.match(
+    html,
+    /class="stage".*class="reward-panel".*data-card-choice="take:i02".*i02\.jpg/,
+  );
+  assert.ok(html.includes(ui.esc(cards.i02.text)));
+  assert.ok(html.includes(ui.esc(cards.l16.text)));
+  assert.doesNotMatch(html, /data-action="take:/);
+  assert.match(html, /data-action="passOffer"/);
+});
+
+test("替换道具时手牌只高亮合法目标，并保留现有道具说明", () => {
+  const room = makeGameRoom({
+    phase: "replace",
+    actions: [
+      { id: "replace:i02", label: "替换生命药水", card: "i02" },
+      { id: "decline", label: "放弃净化", card: "i14" },
+    ],
+  });
+  room.game.players[0].items = ["i02", "i09"];
+  const html = renderGame(room, false);
+  assert.match(
+    html,
+    /class="hand-card is-usable is-replaceable".*data-card-choice="replace:i02"/,
+  );
+  assert.match(html, /class="hand-card is-unavailable" data-hand-item="i09"/);
+  assert.ok(html.includes(ui.esc(cards.i09.text)));
+  assert.doesNotMatch(html, /data-action="replace:/);
+});
+
+test("装备冲突时只高亮允许替换的原装备栏", () => {
+  const room = makeGameRoom({
+    phase: "replace",
+    actions: [
+      { id: "replace:c07", label: "替换偶数符", card: "c07" },
+      { id: "decline", label: "放弃奇数符", card: "c08" },
+    ],
+  });
+  room.game.players[0].gear = ["c07", "l05"];
+  const html = renderGame(room, false);
+  assert.match(
+    html,
+    /class="slot is-replaceable" data-card-choice="replace:c07"/,
+  );
+  assert.match(html, /class="slot" data-detail="l05"/);
+  assert.doesNotMatch(html, /data-action="replace:/);
+});
+
 test("神圣净化显示服务器列出的状态与确认按钮，放弃战斗在右侧", () => {
   const state = newGame(roster);
   startBattle(state, { attackerId: "0", monsterId: "n01" });
