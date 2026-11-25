@@ -46,6 +46,7 @@ test("五个独立座位有不同的默认棋色，第五位可行动并可重�
   assert.equal(view(g, "4").maxPlayers, 5);
   assert.equal(new Set(g.players.map((p) => p.color)).size, 5);
   for (const p of roster.slice(0, 4)) setOnline(g, p.id, false);
+  act(g, "4", "skipOffline");
   choose(g, "roll", die(1));
   assert.equal(g.turn, "4");
   choose(g, "check:accept");
@@ -136,7 +137,7 @@ test("旧版徽章加成与精英生命只升级一次，已受伤害和未选�
     [g.battle.hp, g.battle.maxHp, g.board[18].monsterState.hp],
     [3, 4, 3],
   );
-  assert.equal(g.rulesVersion, 8);
+  assert.equal(g.rulesVersion, 9);
   assert.deepEqual(g.upgrades, []);
 });
 
@@ -195,6 +196,7 @@ test("两只哥布林的血量在逃跑、断线和存档后仍独立保留", ()
   step(g, "roll", die(1));
   assert.deepEqual(hp(g), [1, 2]);
   setOnline(g, p.id, false);
+  act(g, q.id, "skipOffline");
   const saved = restoreGame(JSON.parse(JSON.stringify(g)));
   setOnline(saved, p.id, true);
   saved.players[1].pos = 1;
@@ -608,6 +610,7 @@ test("重连时先完成重置卡升级，恢复暂停战斗后使用新的攻�
   step(g, "roll", die(1));
   choose(g, "use:i06");
   setOnline(g, p.id, false);
+  act(g, "b", "skipOffline");
   assert.equal(g.turn, "b");
   setOnline(g, p.id, true);
   choose(g, "upgrade:act");
@@ -1068,8 +1071,8 @@ test("barricades, ties in same-space clashes and duels at distant sites", () => 
   for (let i = 0; i < 20 && j.battle; i++) step(j, ids(j)[0], die(3));
   assert.equal(j.phase, "loot");
   assert.equal(j.actor, "b");
-  assert.deepEqual(c.alloc, { atk: 0, def: 0, act: 0 });
-  assert.equal(actor(j), "b");
+  assert.deepEqual(c.alloc, { atk: 0, def: 1, act: 0 });
+  assert.equal(actor(j), "a");
   step(j, "upgrade:atk");
   assert.equal(c.pos, 1);
   assert.equal(c.hp, 10);
@@ -1242,6 +1245,8 @@ test("offline seats retain progress, skip turns and can act after reconnecting",
   q.atk = 3;
   q.pos = 32;
   setOnline(g, "a", false);
+  assert.equal(g.turn, "a");
+  act(g, "b", "skipOffline");
   assert.equal(g.turn, "b");
   step(g, "roll", die(2));
   assert.equal(q.pos, 15);
@@ -1256,6 +1261,7 @@ test("offline seats retain progress, skip turns and can act after reconnecting",
   setOnline(g, "a", false);
   assert.deepEqual(ids(g, "a"), []);
   setOnline(g, "b", true);
+  act(g, "b", "skipOffline");
   assert.equal(g.turn, "b");
   assert.equal(q.online, true);
   assert.equal(p.online, false);
@@ -1334,6 +1340,7 @@ test("a disconnected player can resume a private choice or a wounded monster", (
   assert.equal(g.phase, "offer");
   const choices = ids(g);
   setOnline(g, "a", false);
+  act(g, "b", "skipOffline");
   assert.equal(g.turn, "b");
   assert.equal(view(g, "b").players[0].items, undefined);
   setOnline(g, "a", true);
@@ -1348,6 +1355,7 @@ test("a disconnected player can resume a private choice or a wounded monster", (
   step(g, "attack", die(5));
   assert.equal(g.battle.hp, 3);
   setOnline(g, "b", false);
+  act(g, "a", "skipOffline");
   assert.equal(g.turn, "a");
   assert.equal(g.board[18].hp, 3);
   setOnline(g, "b", true);
@@ -1357,6 +1365,215 @@ test("a disconnected player can resume a private choice or a wounded monster", (
   step(g, "heal");
   assert.equal(g.battle.hp, 3);
   assert.equal(g.battle.actors[0], "b");
+});
+
+function duelGame(extra) {
+  const g = extra
+    ? newGame(
+        [
+          { id: "a", name: "甲" },
+          { id: "b", name: "乙" },
+          { id: "c", name: "丙" },
+        ],
+        fixedLayout,
+      )
+    : pair();
+  const [a, b] = g.players;
+  a.pos = 6;
+  b.pos = 7;
+  b.atk = 5;
+  a.hp = 1;
+  a.gear = ["c01"];
+  a.items = ["i02"];
+  step(g, "roll", die(1));
+  return g;
+}
+
+function firstPvpStrike(g) {
+  for (const action of [
+    "attack",
+    "confirmAttack",
+    "defend",
+    "confirm",
+    "confirm",
+  ])
+    choose(g, action, die(2));
+}
+
+test("普通决斗由败者替胜者升级，败者直接增加防御，胜者自己拿战利品", () => {
+  const g = duelGame(),
+    [a, b] = g.players;
+  firstPvpStrike(g);
+  assert.equal(a.pos, 1);
+  assert.equal(a.def, 2);
+  assert.equal(view(g, a.id).actor, a.id);
+  assert.deepEqual(ids(g, b.id), []);
+  assert.match(view(g, a.id).prompt, /替乙.*升级/);
+  act(g, a.id, "upgrade:act");
+  assert.equal(a.act, 1);
+  assert.equal(b.act, 2);
+  assert.ok(ids(g, b.id).includes("loot:c01"));
+  act(g, b.id, "loot:c01");
+  assert.deepEqual(b.gear, ["c01"]);
+  assert.equal(view(g, a.id).players[1].milestones.normalGear, 1);
+});
+
+test("五个无伤回合平手，双方保留位置和财物，直接结束决斗", () => {
+  const g = duelGame(),
+    [a, b] = g.players;
+  a.hp = 10;
+  b.atk = 1;
+  for (let i = 0; i < 10; i++) {
+    choose(g, "attack", die(1));
+    choose(g, "confirmAttack");
+    choose(g, "defend", die(6));
+    choose(g, "confirm");
+    choose(g, "confirm");
+  }
+  assert.equal(g.battle, null);
+  assert.deepEqual([a.pos, b.pos], [7, 7]);
+  assert.deepEqual([a.hp, b.hp], [10, 10]);
+  assert.deepEqual([a.def, b.def], [1, 1]);
+  assert.deepEqual(a.gear, ["c01"]);
+  assert.deepEqual(a.items, ["i02"]);
+  assert.deepEqual(g.upgrades, []);
+  assert.equal(g.phase, "move");
+  assert.equal(g.turn, b.id);
+});
+
+test("主动净化骑士精神的胜者只取得战利品，败者照常增加防御", () => {
+  const g = duelGame(),
+    [a, b] = g.players;
+  b.items = ["i16", "i14"];
+  choose(g, "use:i16");
+  choose(g, "use:i14");
+  choose(g, "use:i14:self:knight");
+  choose(g, "confirmItem");
+  firstPvpStrike(g);
+  assert.equal(a.def, 2);
+  assert.equal(g.phase, "loot");
+  assert.deepEqual(g.upgrades, []);
+  assert.ok(ids(g, b.id).includes("loot-item:0"));
+});
+
+test("离线决斗者返乡且保留牌，胜者自行升级并继续对局", () => {
+  const g = duelGame(true),
+    [a, b] = g.players;
+  setOnline(g, a.id, false);
+  assert.equal(g.battle, null);
+  assert.equal(a.pos, 1);
+  assert.equal(a.def, 1);
+  assert.deepEqual(a.gear, ["c01"]);
+  assert.deepEqual(a.items, ["i02"]);
+  assert.equal(view(g, "c").offlineVote, null);
+  assert.ok(ids(g, b.id).includes("upgrade:atk"));
+  act(g, b.id, "upgrade:atk");
+  assert.equal(b.atk, 6);
+  assert.equal(g.turn, b.id);
+  assert.equal(g.phase, "move");
+});
+
+test("掉线跳过要全员确认，重连撤销表决并保留投出的骰子", () => {
+  const g = newGame(
+    [
+      { id: "a", name: "甲" },
+      { id: "b", name: "乙" },
+      { id: "c", name: "丙" },
+    ],
+    fixedLayout,
+  );
+  act(g, "a", "roll", die(4));
+  setOnline(g, "a", false);
+  assert.equal(g.turn, "a");
+  assert.deepEqual(view(g, "b").offlineVote, {
+    playerId: "a",
+    confirmed: 0,
+    required: 2,
+  });
+  assert.deepEqual(
+    view(g, "c").announcements.map(({ text, kind }) => [text, kind]),
+    [["甲掉线了", "offline"]],
+  );
+  act(g, "b", "skipOffline");
+  assert.equal(view(g, "c").offlineVote.confirmed, 1);
+  assert.throws(() => act(g, "b", "skipOffline"));
+  setOnline(g, "a", true);
+  assert.equal(view(g, "b").offlineVote, null);
+  assert.equal(view(g, "a").dice.total, 4);
+  setOnline(g, "a", false);
+  act(g, "b", "skipOffline");
+  act(g, "c", "skipOffline");
+  assert.equal(g.turn, "b");
+  assert.equal(view(g, "b").offlineVote, null);
+});
+
+test("第十轮起全属性为一返乡，逐人播放首次与重复重生公告", () => {
+  const g = solo(),
+    [p] = g.players;
+  function goHome() {
+    p.pos = 3;
+    p.items = ["i11"];
+    choose(g, "use:i11");
+  }
+  g.round = 8;
+  goHome();
+  assert.deepEqual(view(g, "a").announcements, []);
+  g.round = 10;
+  goHome();
+  goHome();
+  assert.deepEqual(
+    view(g, "a").announcements.map(({ text }) => text),
+    ["重生之“甲”依旧是小兵", "重生之“甲”TM又重生了"],
+  );
+  p.def = 2;
+  goHome();
+  assert.equal(view(g, "a").announcements.length, 2);
+});
+
+test("里程碑只计算实际领取的牌并逐只记录哥布林击杀", () => {
+  const g = solo(),
+    [a] = g.players;
+  g.phase = "offer";
+  g.pending = { ids: ["i02"], canPass: true };
+  choose(g, "passOffer");
+  assert.equal(view(g, "a").players[0].milestones.items, 0);
+  a.pos = 3;
+  a.atk = 8;
+  a.act = 4;
+  g.board[3].monster = "n04";
+  step(g, "roll", die(1));
+  for (let i = 0; i < 4; i++) step(g, "attack", die(6));
+  assert.equal(view(g, "a").players[0].milestones.normalKills, 2);
+  assert.equal(view(g, "a").players[0].milestones.items, 0);
+  choose(g, ids(g)[0]);
+  assert.equal(view(g, "a").players[0].milestones.items, 1);
+});
+
+test("计时器使用开局时刻、支持超过两小时并在胜利后冻结", () => {
+  const g = newGame([{ id: "a", name: "甲" }], fixedLayout, 123);
+  assert.equal(view(g, "a", 7_500_123).elapsedMs, 7_500_000);
+  g.winner = "a";
+  g.finishedAt = 7_600_123;
+  assert.equal(view(g, "a", 8_000_123).elapsedMs, 7_600_000);
+});
+
+test("旧存档保留原先拥有的牌，新增的计时和里程碑从更新后开始", () => {
+  const g = solo();
+  g.rulesVersion = 8;
+  delete g.startedAt;
+  delete g.players[0].milestones;
+  g.players[0].gear = ["c01"];
+  g.players[0].items = ["i02"];
+  const resumed = restoreGame(
+    JSON.parse(JSON.stringify(g)),
+    fixedLayout,
+    50_000,
+  );
+  const snapshot = view(resumed, "a", 52_000);
+  assert.equal(snapshot.elapsedMs, 2_000);
+  assert.equal(snapshot.players[0].milestones.items, 0);
+  assert.deepEqual(snapshot.players[0].gear, ["c01"]);
+  assert.deepEqual(snapshot.players[0].items, ["i02"]);
 });
 
 function generator(seed) {
@@ -1462,7 +1679,15 @@ for (const count of [1, 4, 5]) {
           }),
       );
       assert.equal(g.players.find((p) => p.id === g.winner).pos, 100);
-      for (const p of g.players) assert.deepEqual(view(g, p.id).actions, []);
+      assert.ok(
+        g.players.find((p) => p.id === g.winner).milestones.bossKills > 0,
+      );
+      assert.ok(g.finishedAt >= g.startedAt);
+      for (const p of g.players) {
+        const result = view(g, p.id, g.finishedAt + 10_000);
+        assert.deepEqual(result.actions, []);
+        assert.equal(result.elapsedMs, g.finishedAt - g.startedAt);
+      }
     },
   );
 }

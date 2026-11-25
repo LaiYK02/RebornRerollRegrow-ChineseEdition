@@ -939,6 +939,20 @@ html:has(body.playing) {
   white-space: nowrap;
   color: #f8e2b1;
 }
+.round-and-time {
+  display: inline-flex;
+  align-items: center;
+  gap: clamp(5px, 1vw, 13px);
+  justify-self: start;
+}
+.elapsed-timer {
+  padding-inline-start: clamp(5px, 1vw, 12px);
+  border-inline-start: 1px solid #c2ad79a0;
+  color: #fff2ca;
+  font-variant-numeric: tabular-nums;
+  font-weight: 750;
+  white-space: nowrap;
+}
 .round-indicator strong {
   color: #fff8df;
   font-size: 18px;
@@ -963,6 +977,24 @@ html:has(body.playing) {
   display: flex;
   justify-content: flex-end;
   gap: 5px;
+}
+.offline-vote-region:empty {
+  display: none;
+}
+.offline-vote-region {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 5px 12px;
+  padding: 3px 0 2px;
+  border-top: 1px solid #d9b8776b;
+  color: #ffdfa3;
+}
+.offline-vote-progress {
+  font-size: 12px;
+  font-weight: 750;
 }
 .dock-small {
   display: inline-flex;
@@ -1824,6 +1856,7 @@ html:has(body.playing) {
 }
 .exit-dock {
   justify-content: end;
+  flex-wrap: wrap;
 }
 .field-panel summary,
 .surrender-button {
@@ -1877,6 +1910,43 @@ html:has(body.playing) {
 #adventure-log .field-panel-body {
   width: min(208px, calc(100vw - 24px));
 }
+#player-milestones .field-panel-body {
+  left: auto;
+  right: 0;
+  width: min(335px, calc(100vw - 24px));
+  color: #574a35;
+}
+.milestones-body section + section {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid #c9ac79;
+}
+.milestones-body h3 {
+  margin: 0 0 5px;
+  padding-left: 6px;
+  border-left: 3px solid var(--pc);
+  color: #3c4e42;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.milestones-body dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px 10px;
+  margin: 0;
+  font-size: 11px;
+}
+.milestones-body dl div {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 3px;
+}
+.milestones-body dd {
+  margin: 0;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
 .field-panel .chat-msg {
   max-height: min(185px, 32vh);
   min-height: 26px;
@@ -1905,14 +1975,15 @@ html:has(body.playing) {
   display: flex;
   align-items: stretch;
   justify-content: safe center;
-  padding: 13px 16px 30px;
+  padding: 24px 38px 41px;
   overflow: auto hidden;
   scrollbar-width: thin;
   scrollbar-color: #947842 #f0dfb7;
 }
 .item-hand.many-cards
   .hand-card:not(:hover, :focus-visible, [aria-pressed="true"]) {
-  transform: none;
+  transform: translateY(calc(var(--fan-drop) * 0.62))
+    rotate(calc(var(--fan-angle) * 0.5));
 }
 .hand-card {
   flex: 0 0 clamp(110px, 10.5vw, 156px);
@@ -1934,8 +2005,7 @@ html:has(body.playing) {
   font-size: clamp(11px, 1vw, 13px);
   line-height: 1.25;
   transform-origin: center 93%;
-  transform: translateY(min(7px, var(--fan-drop)))
-    rotate(calc(var(--fan-angle) * 0.19));
+  transform: translateY(var(--fan-drop)) rotate(var(--fan-angle));
   transition:
     transform 0.19s ease-out,
     filter 0.19s ease-out,
@@ -1972,7 +2042,7 @@ html:has(body.playing) {
 .hand-card:hover,
 .hand-card:focus-visible,
 .hand-card[aria-pressed="true"] {
-  transform: translateY(-7px) rotate(calc(var(--fan-angle) * 0.32));
+  transform: translateY(-9px) rotate(calc(var(--fan-angle) * 0.46));
   filter: none;
 }
 .hand-card.is-replaceable {
@@ -1990,9 +2060,80 @@ html:has(body.playing) {
   justify-self: center;
   margin-top: -28px;
   width: 100%;
+  translate: 0 -18px;
 }
 .item-hand[hidden] + .own-hud {
   margin-top: 0;
+}
+.hand-dock:has(.actions) .item-hand[hidden] + .own-hud {
+  translate: 0 -8px;
+}
+.announcement-live {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.game-announcement {
+  --announcement-ink: #ffe3a8;
+  --announcement-border: #d4985c;
+  --announcement-bg: #382c24ed;
+  position: fixed;
+  z-index: 24;
+  inset: 0;
+  display: grid;
+  justify-items: center;
+  align-items: start;
+  padding: max(65px, 24svh) 16px 16px;
+  background: radial-gradient(ellipse, transparent 28%, #3930246c);
+  pointer-events: none;
+  animation: announcement-fade var(--announcement-duration, 2.8s) ease both;
+}
+.game-announcement[data-kind="rebirth"] {
+  --announcement-ink: #f7efc6;
+  --announcement-border: #a1cd9e;
+  --announcement-bg: #294638ed;
+  background: radial-gradient(ellipse, transparent 30%, #456c4b66);
+}
+.announcement-banner {
+  display: flex;
+  align-items: center;
+  gap: clamp(8px, 2vw, 18px);
+  max-width: min(660px, 100%);
+  margin: 0;
+  padding: clamp(12px, 2vw, 23px) clamp(17px, 4vw, 44px);
+  border: 1px solid var(--announcement-border);
+  border-radius: 12px;
+  background: var(--announcement-bg);
+  color: var(--announcement-ink);
+  box-shadow:
+    0 8px 28px #202c2466,
+    inset 0 0 0 2px #ffe6a927;
+  font-size: clamp(19px, 3.2vw, 34px);
+  font-weight: 800;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.announcement-banner .icon {
+  width: 1em;
+  height: 1em;
+}
+@keyframes announcement-fade {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  12%,
+  82% {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .game-announcement {
+    animation: none;
+  }
 }
 .victory {
   text-align: center;

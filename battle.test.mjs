@@ -776,6 +776,108 @@ test("玩家决斗擂主先攻，行动和反应均由对应玩家执行，击�
   assert.deepEqual(s.combatEvents.at(-1).fallen, ["挑战者"]);
 });
 
+function duelTurn(s, attack = 1, defense = 1) {
+  play(s, "attack", die(attack));
+  return play(s, "defend", die(defense));
+}
+
+test("连续五个完整回合无人受伤且生命相同，决斗判为平局", () => {
+  let s = state(hero("甲"), hero("乙"));
+  startBattle(s, { attackerId: "甲", defenderId: "乙" });
+  for (let turn = 0; turn < 9; turn++) assert.equal(duelTurn(s), null);
+  assert.equal(s.battle.round, 5);
+  s = JSON.parse(JSON.stringify(s));
+  assert.deepEqual(duelTurn(s), { type: "pvpDraw" });
+  assert.deepEqual(choices(s), []);
+});
+
+test("无伤决斗结束时比较当前生命，治疗不会打断无伤回合", () => {
+  const s = state(hero("甲", { hp: 5, items: ["i02"] }), hero("乙", { hp: 6 }));
+  startBattle(s, { attackerId: "甲", defenderId: "乙" });
+  for (let turn = 0; turn < 8; turn++) assert.equal(duelTurn(s), null);
+  play(s, "use:i02");
+  assert.equal(duelTurn(s), null);
+  assert.deepEqual(duelTurn(s), {
+    type: "pvpWin",
+    winnerId: "甲",
+    loserId: "乙",
+  });
+});
+
+test("后一方在第五回合造成实际伤害时重新累计无伤回合", () => {
+  const s = state(hero("甲"), hero("乙"));
+  startBattle(s, { attackerId: "甲", defenderId: "乙" });
+  for (let turn = 0; turn < 9; turn++) assert.equal(duelTurn(s), null);
+  assert.equal(duelTurn(s, 6), null);
+  assert.equal(s.players[0].hp, 9);
+  for (let turn = 0; turn < 9; turn++) assert.equal(duelTurn(s), null);
+  assert.deepEqual(duelTurn(s), {
+    type: "pvpWin",
+    winnerId: "乙",
+    loserId: "甲",
+  });
+});
+
+test("荆棘反击属于实际伤害", () => {
+  const thorn = state(
+    hero("甲", { items: ["i13"] }),
+    hero("乙", { gear: ["l05"] }),
+  );
+  startBattle(thorn, { attackerId: "甲", defenderId: "乙" });
+  duelTurn(thorn);
+  assert.equal(thorn.battle.last.damage, 0);
+  assert.equal(thorn.players[0].hp, 9);
+  duelTurn(thorn);
+  playCleanse(thorn, "use:i13:l05");
+  for (let turn = 0; turn < 9; turn++) assert.equal(duelTurn(thorn), null);
+  assert.deepEqual(duelTurn(thorn), {
+    type: "pvpWin",
+    winnerId: "乙",
+    loserId: "甲",
+  });
+});
+
+test("名刀挡下的致命攻击不打断无伤回合", () => {
+  const blocked = state(hero("甲"), hero("乙", { hp: 1, gear: ["l15"] }));
+  startBattle(blocked, { attackerId: "甲", defenderId: "乙" });
+  for (let turn = 0; turn < 8; turn++) assert.equal(duelTurn(blocked), null);
+  assert.equal(duelTurn(blocked, 6), null);
+  assert.equal(blocked.battle.last.damage, 0);
+  assert.deepEqual(duelTurn(blocked), {
+    type: "pvpWin",
+    winnerId: "甲",
+    loserId: "乙",
+  });
+});
+
+test("凤凰之泪复活前受到的实际伤害会重置无伤回合", () => {
+  const s = state(hero("甲", { hp: 1, gear: ["l04"] }), hero("乙"));
+  startBattle(s, { attackerId: "甲", defenderId: "乙" });
+  for (let turn = 0; turn < 9; turn++) assert.equal(duelTurn(s), null);
+  assert.equal(duelTurn(s, 6), null);
+  assert.equal(s.players[0].hp, 10);
+  for (let turn = 0; turn < 9; turn++) assert.equal(duelTurn(s), null);
+  assert.deepEqual(duelTurn(s), { type: "pvpDraw" });
+});
+
+test("净化骑士精神按实际用牌者记录，预览与取消不计入", () => {
+  const s = state(
+    hero("甲", { items: ["i16", "i14"] }),
+    hero("乙", { items: ["i15"] }),
+  );
+  startBattle(s, { attackerId: "甲", defenderId: "乙" });
+  play(s, "use:i16");
+  choose(s, "use:i14");
+  choose(s, "use:i14:other:knight");
+  choose(s, "cancelItem");
+  assert.deepEqual(s.battle.knightCleansedBy, []);
+  playCleanse(s, "use:i14:other:knight");
+  assert.deepEqual(s.battle.knightCleansedBy, ["甲"]);
+  play(s, "attack");
+  playCleanse(s, "use:i15:other:debuff");
+  assert.deepEqual(s.battle.knightCleansedBy, ["甲", "乙"]);
+});
+
 test("借运骰和黄金骰作用于一次判定，重掷与砝码只改变自己的结果，命数棱镜可反转", () => {
   const s = encounter("e03", { items: ["i18", "i09", "i08", "i19", "i01"] });
   play(s, "use:i18:6");

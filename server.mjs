@@ -7,7 +7,7 @@ import { isIPv4 } from "node:net";
 import { hostname, networkInterfaces } from "node:os";
 import { dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { MAX_PLAYERS, act, newGame, setOnline, view } from "./game.mjs";
+import { MAX_PLAYERS, act, newGame, setPlayersOnline, view } from "./game.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const publicFiles = new Set([
@@ -224,21 +224,44 @@ export function createRoomServer({ now = Date.now, offlineMs = 25_000 } = {}) {
   let room = null;
   let addresses;
   let refreshedAt = -Infinity;
+  let presenceTimer;
 
-  function updateOnline(seat, online) {
-    if (seat.online === online) return;
-    seat.online = online;
-    if (room.game) {
-      setOnline(room.game, seat.id, online);
-      room.revision++;
-    }
+  function stopPresenceTimer() {
+    clearInterval(presenceTimer);
+    presenceTimer = undefined;
   }
 
-  function refreshPresence(time) {
+  function expireIdleRoom() {
+    const time = now();
+    // Requests handle active rooms. If all browsers disappear, reconcile the
+    // entire quiet room before any returning player can win a duel by default.
+    if (
+      room.players.every(
+        (seat) => !seat.online || time - seat.lastSeen > offlineMs,
+      )
+    )
+      refreshPresence(time);
+  }
+
+  function refreshPresence(time, caller = null, leaving = false) {
+    if (caller && !leaving) caller.lastSeen = time;
+    const changes = [];
     for (const seat of room.players) {
-      if (seat.online && time - seat.lastSeen >= offlineMs)
-        updateOnline(seat, false);
+      const online =
+        seat === caller
+          ? !leaving
+          : seat.online && time - seat.lastSeen < offlineMs;
+      if (online !== seat.online) changes.push({ id: seat.id, online });
     }
+    if (changes.length && room.game) {
+      // Resolve votes and duel forfeits against the complete set of live seats.
+      const next = structuredClone(room.game);
+      setPlayersOnline(next, changes, time);
+      room.game = next;
+      room.revision++;
+    }
+    for (const change of changes)
+      room.players.find((seat) => seat.id === change.id).online = change.online;
     if (!room.game) {
       room.players = room.players.filter(
         (seat) => seat.id === room.hostId || time - seat.lastSeen < 120_000,
@@ -258,7 +281,7 @@ export function createRoomServer({ now = Date.now, offlineMs = 25_000 } = {}) {
       address: room.selected.address,
       url: room.selected.url,
       addresses: seat.id === room.hostId ? addresses : [room.selected],
-      game: room.game ? view(room.game, seat.id) : null,
+      game: room.game ? view(room.game, seat.id, now()) : null,
     };
   }
 
@@ -330,7 +353,6 @@ export function createRoomServer({ now = Date.now, offlineMs = 25_000 } = {}) {
       // Await the entire request before reading or changing shared room state.
       const body = req.method === "POST" ? await readBody(req) : {};
       const time = now();
-      if (room) refreshPresence(time);
       const canHost = localHost && isLoopback(req.socket.remoteAddress);
       if (route === "info")
         return reply(res, 200, {
@@ -357,6 +379,8 @@ export function createRoomServer({ now = Date.now, offlineMs = 25_000 } = {}) {
           game: null,
           revision: 0,
         };
+        presenceTimer = setInterval(expireIdleRoom, Math.min(1000, offlineMs));
+        presenceTimer.unref();
         return reply(res, 200, { token: seat.token, room: snapshot(seat) });
       }
       if (!room)
@@ -364,6 +388,7 @@ export function createRoomServer({ now = Date.now, offlineMs = 25_000 } = {}) {
       if (route === "join") {
         if (room.game)
           fail(409, "IN_GAME", "游戏已经开始，只有原有玩家可以重连。");
+        refreshPresence(time);
         if (room.players.length >= MAX_PLAYERS)
           fail(409, "ROOM_FULL", `房间已满，最多允许 ${MAX_PLAYERS} 名玩家。`);
         const seat = newSeat(body, room.players, time);
@@ -374,10 +399,13 @@ export function createRoomServer({ now = Date.now, offlineMs = 25_000 } = {}) {
         req.headers.authorization ?? "",
       )?.[1];
       const seat = room.players.find((p) => p.token === token);
-      if (!seat) fail(401, "NO_SEAT", "无法恢复座位，请重新加入房间。");
-      seat.lastSeen = time;
-      updateOnline(seat, true);
-      if (route === "state") return reply(res, 200, { room: snapshot(seat) });
+      if (
+        !seat ||
+        (!room.game &&
+          seat.id !== room.hostId &&
+          time - seat.lastSeen >= 120_000)
+      )
+        fail(401, "NO_SEAT", "无法恢复座位，请重新加入房间。");
       if (
         ["start", "restart", "address", "destroy"].includes(route) &&
         seat.id !== room.hostId
@@ -385,12 +413,18 @@ export function createRoomServer({ now = Date.now, offlineMs = 25_000 } = {}) {
         fail(403, "HOST_ONLY", "只有房主可以执行此操作。");
       }
       if (route === "destroy") {
+        stopPresenceTimer();
         room = null;
         return reply(res, 200, { ok: true });
       }
+      // A delayed move from a departed client cannot reclaim the seat.
+      if (route === "action" && room.game && !seat.online)
+        fail(409, "STALE", "场上局势已改变，请刷新后再试。");
+      refreshPresence(time, seat, route === "leave");
+      if (route === "state") return reply(res, 200, { room: snapshot(seat) });
       if (route === "leave") {
-        if (room.game || seat.id === room.hostId) updateOnline(seat, false);
-        else room.players = room.players.filter((p) => p !== seat);
+        if (!room.game && seat.id !== room.hostId)
+          room.players = room.players.filter((p) => p !== seat);
         return reply(res, 200, { ok: true });
       }
       if (route === "address")
@@ -411,7 +445,7 @@ export function createRoomServer({ now = Date.now, offlineMs = 25_000 } = {}) {
           fail(409, "IN_GAME", "游戏已经开始。");
         if (route === "restart" && !room.game)
           fail(409, "LOBBY", "请先开始游戏。");
-        room.game = newGame(room.players.map(publicSeat));
+        room.game = newGame(room.players.map(publicSeat), Math.random, time);
         room.revision++;
       }
       if (route === "action") {
@@ -426,7 +460,7 @@ export function createRoomServer({ now = Date.now, offlineMs = 25_000 } = {}) {
           fail(400, "BAD_ACTION", "无效的行动。");
         const nextGame = structuredClone(room.game);
         try {
-          act(nextGame, seat.id, body.actionId);
+          act(nextGame, seat.id, body.actionId, Math.random, time);
         } catch (error) {
           fail(400, "BAD_ACTION", error.message || "无效的行动。");
         }
@@ -445,6 +479,7 @@ export function createRoomServer({ now = Date.now, offlineMs = 25_000 } = {}) {
   });
   server.requestTimeout = 15_000;
   server.headersTimeout = 10_000;
+  server.on("close", stopPresenceTimer);
   return server;
 }
 

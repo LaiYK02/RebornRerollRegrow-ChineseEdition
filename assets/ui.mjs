@@ -77,8 +77,25 @@ export function textLines(value) {
 }
 export function cardEffects(card) {
   return [...new Set([card?.text, ...(card?.effects || [])].filter(Boolean))]
-    .map((effect) => "<span>" + textLines(effect) + "</span>")
+    .map(
+      (effect) =>
+        "<span>" +
+        textLines(
+          effect.replace(/\s*[（(]\s*(?:仅\s*)?\d+\s*张\s*[）)]\s*$/u, ""),
+        ) +
+        "</span>",
+    )
     .join("");
+}
+export function formatElapsed(ms) {
+  const seconds = Math.max(0, Math.floor((ms || 0) / 1000));
+  return [
+    Math.floor(seconds / 3600),
+    Math.floor(seconds / 60) % 60,
+    seconds % 60,
+  ]
+    .map((part) => String(part).padStart(2, "0"))
+    .join(":");
 }
 export const palette = [
   "#348f98",
@@ -973,7 +990,9 @@ function handCards(me, items, menu, selected, replacements) {
         const active = menu
           ? card === menu.card && me.items.indexOf(card) === index
           : selected?.index === index;
-        const offset = index - (me.items.length - 1) / 2;
+        const center = (me.items.length - 1) / 2;
+        const offset = center ? (index - center) / center : 0;
+        const maxTilt = Math.min(17, 6 + me.items.length * 2);
         const name = esc(cards[card]?.name);
         const label =
           name + (replacement ? " · 可替换" : usable ? "" : " · 当前只可查看");
@@ -995,9 +1014,9 @@ function handCards(me, items, menu, selected, replacements) {
           '" style="--fan-index:' +
           index +
           ";--fan-angle:" +
-          Math.max(-24, Math.min(24, offset * 6)) +
+          offset * maxTilt +
           "deg;--fan-drop:" +
-          Math.min(19, offset * offset * 1.8) +
+          offset * offset * 20 +
           'px">' +
           cardSummary(card) +
           "</button>"
@@ -1095,6 +1114,65 @@ function equipmentTargetPanel(menu, choices) {
   );
 }
 
+const milestoneLabels = {
+  items: "获得道具",
+  normalGear: "获得普通装备",
+  legendaryGear: "获得传说装备",
+  normalKills: "击败普通怪物",
+  eliteKills: "击败精英怪物",
+  bossKills: "击败头目",
+};
+
+function milestones(players) {
+  return (
+    '<details id="player-milestones" class="field-panel"><summary>' +
+    icon("crown") +
+    '里程碑</summary><div class="field-panel-body milestones-body">' +
+    players
+      .map(
+        (p) =>
+          '<section data-milestone-player="' +
+          esc(p.id) +
+          '"><h3 style="--pc:' +
+          colorsafe(p.color) +
+          '">' +
+          esc(p.name) +
+          "</h3><dl>" +
+          Object.entries(milestoneLabels)
+            .map(
+              ([key, label]) =>
+                "<div><dt>" +
+                label +
+                "</dt><dd>" +
+                esc(p.milestones?.[key] ?? 0) +
+                "</dd></div>",
+            )
+            .join("") +
+          "</dl></section>",
+      )
+      .join("") +
+    "</div></details>"
+  );
+}
+
+export function offlineVotePrompt(g, actionable = true) {
+  if (!g?.offlineVote || g.winner) return "";
+  const { playerId, confirmed, required } = g.offlineVote;
+  const name = g.players.find((p) => p.id === playerId)?.name || "骑士";
+  const vote =
+    actionable && g.actions?.find((action) => action.id === "skipOffline");
+  return (
+    '<span class="offline-vote-progress" role="status">' +
+    esc(name) +
+    " 已离线 · 跳过回合投票 " +
+    esc(confirmed) +
+    " / " +
+    esc(required) +
+    "</span>" +
+    (vote ? renderAction(vote) : "")
+  );
+}
+
 export function game(r, solo, combatResolving = false, handSelection = null) {
   const g = r.game,
     me = g.players.find((p) => p.id === r.you),
@@ -1122,6 +1200,7 @@ export function game(r, solo, combatResolving = false, handSelection = null) {
   const visibleActions = actions.filter(
     (a) =>
       a !== surrender &&
+      a.id !== "skipOffline" &&
       !offers.includes(a) &&
       !inlineChoices.includes(a) &&
       !a.id.startsWith("replace:") &&
@@ -1143,16 +1222,22 @@ export function game(r, solo, combatResolving = false, handSelection = null) {
       ? currentName + " · 战斗结算中…"
       : g.prompt || currentName + " · 选择行动";
   return (
-    '<section class="game"><div class="game-top"><span class="round-indicator">' +
+    '<section class="game"><div class="game-top"><div class="round-and-time"><span class="round-indicator">' +
     icon("flag") +
     " 第 <strong>" +
     esc(g.round ?? 1) +
     "</strong> 轮" +
-    '</span><p class="game-prompt" aria-live="polite">' +
+    '</span><time class="elapsed-timer" title="对局用时" datetime="PT' +
+    Math.max(0, Math.floor((g.elapsedMs || 0) / 1000)) +
+    'S">' +
+    formatElapsed(g.elapsedMs) +
+    '</time></div><p class="game-prompt" aria-live="polite">' +
     esc(prompt) +
     '</p><div class="game-nav">' +
     button("roomOptions", "房间", "users", "dock-small") +
     button("legend", "地图图例", "map", "dock-small") +
+    '</div><div class="offline-vote-region">' +
+    offlineVotePrompt(g, !combatResolving) +
     '</div></div><div class="arena"><aside class="seat-rail seat-left" aria-label="其他骑士">' +
     side(false) +
     '</aside><div class="stage">' +
@@ -1211,6 +1296,7 @@ export function game(r, solo, combatResolving = false, handSelection = null) {
     hud(me, true, g.battle, me.id === g.actor, replacements) +
     "</div></div>" +
     '<div class="exit-dock">' +
+    milestones(g.players) +
     (g.battle?.monster && !win
       ? '<button type="button" class="surrender-button"' +
         (surrender ? ' data-action="surrender"' : " disabled") +

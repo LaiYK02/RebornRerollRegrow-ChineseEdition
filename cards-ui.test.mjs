@@ -94,7 +94,8 @@ test("奖励牌在场中显示卡图、名称和完整效果，先打开确认",
     html,
     /class="stage".*class="reward-panel".*data-card-choice="take:i02".*i02\.jpg/,
   );
-  assert.ok(html.includes(ui.esc(cards.i02.text)));
+  assert.ok(html.includes("回复 2 点生命。"));
+  assert.doesNotMatch(html, /（5 张）/);
   assert.ok(html.includes(cards.l16.text.split("\n").map(ui.esc).join("<br>")));
   assert.doesNotMatch(html, /data-action="take:/);
   assert.match(html, /data-action="passOffer"/);
@@ -115,7 +116,12 @@ test("替换道具时手牌只高亮合法目标，并保留现有道具说明",
     /class="hand-card is-usable is-replaceable".*data-card-choice="replace:i02"/,
   );
   assert.match(html, /class="hand-card is-unavailable" data-hand-item="i09"/);
-  assert.ok(html.includes(cards.i09.text.split("\n").map(ui.esc).join("<br>")));
+  assert.ok(
+    html.includes(
+      "本阶段可额外投掷 1 枚骰子。<br>任何阶段均可使用，包括移动阶段。",
+    ),
+  );
+  assert.doesNotMatch(html, /（3 张）/);
   assert.doesNotMatch(html, /data-action="replace:/);
 });
 
@@ -262,6 +268,51 @@ test("移动预览标明起点、经过、预计停止和结算位", () => {
   assert.match(html, /data-tile="2" data-preview="final"/);
   assert.match(html, /data-tile="3" data-preview="destination"/);
   assert.doesNotMatch(html, /data-tile="4" data-preview/);
+});
+
+test("道具效果保留换行和规则数字，图卡省略牌堆张数", () => {
+  assert.equal(
+    ui.cardEffects(cards.i01),
+    "<span>已有判定结果时，将成功与失败互换。<br>原骰点和判定点数保持原值。</span>",
+  );
+  assert.doesNotMatch(ui.cardEffects(cards.i16), /仅 1 张/);
+});
+
+test("对局计时紧接轮数，超过一小时仍显示时分秒", () => {
+  const html = renderGame(makeGameRoom({ elapsedMs: 90061000 }), false);
+  assert.match(
+    html,
+    /round-indicator.*轮<\/span><time class="elapsed-timer"[^>]*>25:01:01<\/time>/,
+  );
+});
+
+test("里程碑使用每位玩家自己的统计数据并转义昵称", () => {
+  const room = makeGameRoom();
+  room.game.players[1].name = "<正午>";
+  room.game.players[1].milestones = {
+    items: 3,
+    normalGear: 2,
+    legendaryGear: 1,
+    normalKills: 8,
+    eliteKills: 5,
+    bossKills: 4,
+  };
+  const html = renderGame(room, false);
+  assert.match(
+    html,
+    /id="player-milestones".*data-milestone-player="1".*&lt;正午&gt;.*获得道具<\/dt><dd>3<\/dd>.*击败头目<\/dt><dd>4<\/dd>/,
+  );
+});
+
+test("离线投票进度向所有人显示，只有可投票者有一个确认按钮", () => {
+  const offlineVote = { playerId: "1", confirmed: 1, required: 2 };
+  const state = makeGameRoom({ offlineVote, actions: [] });
+  const observer = renderGame(state, false);
+  assert.match(observer, /offline-vote-progress[^>]*>.*正午.*1 \/ 2/);
+  assert.doesNotMatch(observer, /data-action="skipOffline"/);
+  state.game.actions = [{ id: "skipOffline", label: "同意跳过" }];
+  const eligible = renderGame(state, false);
+  assert.equal([...eligible.matchAll(/data-action="skipOffline"/g)].length, 1);
 });
 
 test("双方骰点分别显示于各自卡牌底部，成功结果随防守方显示", () => {

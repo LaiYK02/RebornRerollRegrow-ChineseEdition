@@ -36,13 +36,27 @@ const capHP = (p, amount) => {
 const itemLimit = (p) => (equipped(p, "l16") ? Infinity : 5);
 const action = (id, label, card) =>
   card ? { id, label, card } : { id, label };
-const rulesVersion = 8;
+const rulesVersion = 9;
 const matchId = () =>
   Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+const emptyMilestones = () => ({
+  items: 0,
+  normalGear: 0,
+  legendaryGear: 0,
+  normalKills: 0,
+  eliteKills: 0,
+  bossKills: 0,
+});
 
 function log(game, message) {
   game.log.push(message);
   if (game.log.length > 120) game.log.splice(0, game.log.length - 120);
+}
+
+function announce(game, text, kind) {
+  const events = (game.announcements ??= []);
+  events.push({ seq: (events.at(-1)?.seq ?? 0) + 1, text, kind });
+  if (events.length > 24) events.shift();
 }
 
 function board(rng) {
@@ -102,7 +116,10 @@ function board(rng) {
   return shuffled;
 }
 
-export function restoreGame(game, rng = Math.random) {
+export function restoreGame(game, rng = Math.random, now = Date.now()) {
+  game.startedAt ??= now;
+  if (game.winner) game.finishedAt ??= now;
+  for (const p of game.players) p.milestones ??= emptyMilestones();
   const legacyCombat = (game.rulesVersion ?? 0) < 4;
   const beforeV8 = (game.rulesVersion ?? 0) < 8;
   if (beforeV8) {
@@ -282,7 +299,7 @@ export function restoreGame(game, rng = Math.random) {
   return game;
 }
 
-export function newGame(roster, rng = Math.random) {
+export function newGame(roster, rng = Math.random, now = Date.now()) {
   if (
     !Array.isArray(roster) ||
     roster.length < 1 ||
@@ -311,6 +328,7 @@ export function newGame(roster, rng = Math.random) {
     statuses: [],
     movePenalty: 0,
     arrived: 0,
+    milestones: emptyMilestones(),
   }));
   const turn = (players.find((p) => p.online) || players[0]).id;
   return {
@@ -318,6 +336,7 @@ export function newGame(roster, rng = Math.random) {
     upgrades: [],
     rulesVersion,
     matchId: matchId(),
+    startedAt: now,
     board: board(rng),
     turn,
     actor: turn,
@@ -379,12 +398,24 @@ function nextTurn(game, rng) {
   }
 }
 
-function grantUpgrade(game, p, count = 1, kind = "permanent") {
-  if (count > 0) game.upgrades.push({ id: p.id, count, kind });
+function grantUpgrade(game, p, count = 1, kind = "permanent", chooser) {
+  if (count > 0)
+    game.upgrades.push({
+      id: p.id,
+      count,
+      kind,
+      ...(chooser ? { chooser } : {}),
+    });
 }
 
 function pendingUpgrade(game) {
   return game.upgrades.find((entry) => player(game, entry.id)?.online);
+}
+
+function upgradeChooser(game, entry) {
+  return entry.chooser && player(game, entry.chooser)?.online
+    ? entry.chooser
+    : entry.id;
 }
 
 function syncBadge(game, p) {
@@ -446,6 +477,18 @@ function relocate(game, p, position, death = false, stepwise = false) {
     for (const stat of Object.keys(stats)) upgrade(p, stat);
     log(game, p.name + " 触发并弃置归途传承印，三项属性各永久 +1。");
     removeGear(game, p, "l13");
+  }
+  if (
+    dest === 1 &&
+    (moved || death) &&
+    game.round >= 10 &&
+    p.atk === 1 &&
+    p.def === 1 &&
+    p.act === 1
+  ) {
+    const phrase = p.rebornAsRecruit ? "TM又重生了" : "依旧是小兵";
+    announce(game, `重生之“${p.name}”${phrase}`, "rebirth");
+    p.rebornAsRecruit = true;
   }
 }
 
@@ -545,6 +588,9 @@ function receive(game, p, card, replacing) {
   }
   if (isItem) p.items.push(card);
   else p.gear.push(card);
+  p.milestones[
+    isItem ? "items" : legendary(card) ? "legendaryGear" : "normalGear"
+  ]++;
   syncBadge(game, p);
   log(
     game,
@@ -558,7 +604,37 @@ function startFight(game, options, rng) {
   startBattle(game, options, rng);
 }
 
-function settleBattle(game, outcome, rng) {
+function countMonsterKill(p, card) {
+  const key = {
+    n: "normalKills",
+    e: "eliteKills",
+    b: "bossKills",
+    f: "bossKills",
+  }[card[0]];
+  if (key) p.milestones[key]++;
+}
+
+function countBattleKills(game, since) {
+  const b = game.battle;
+  if (!b.monster || game.combatSequence === since) return;
+  const p = player(game, b.first);
+  for (const event of game.combatEvents ?? []) {
+    if (event.seq <= since) continue;
+    for (const id of event.fallen) {
+      if (id === "$monster") {
+        countMonsterKill(p, event.frame.battle.form);
+        b.countedMonster = true;
+      } else if (id.startsWith("$monster:")) {
+        const enemy = event.frame.battle.enemies.find(
+          (enemy) => enemy.id === id,
+        );
+        countMonsterKill(p, enemy.form);
+      }
+    }
+  }
+}
+
+function settleBattle(game, outcome, rng, now) {
   if (!outcome) return;
   const b = game.battle;
   const p = player(
@@ -573,10 +649,26 @@ function settleBattle(game, outcome, rng) {
   if (outcome.type === "pvpWin") {
     const winner = player(game, outcome.winnerId),
       loser = player(game, outcome.loserId);
+    if (!outcome.offline) upgrade(loser, "def");
     respawn(game, loser, { duel: true });
-    grantUpgrade(game, winner);
-    log(game, winner.name + " 赢得决斗，获得 1 次升级。");
-    if (loser.gear.length + loser.items.length)
+    const qualifies =
+      outcome.offline || !b.knightCleansedBy?.includes(winner.id);
+    if (qualifies)
+      grantUpgrade(
+        game,
+        winner,
+        1,
+        "permanent",
+        outcome.offline ? undefined : loser.id,
+      );
+    log(
+      game,
+      outcome.offline
+        ? `${loser.name} 掉线判负并返回起点。${winner.name} 可自选一次升级。`
+        : `${winner.name} 赢得决斗。${loser.name} 的防御点数 +1。` +
+            (qualifies ? "" : "胜者已净化骑士精神，本次无升级。"),
+    );
+    if (!outcome.offline && loser.gear.length + loser.items.length)
       phase(game, "loot", { loser: loser.id }, winner.id);
   } else if (outcome.type === "escape") {
     if (b.monster === "final") {
@@ -594,10 +686,13 @@ function settleBattle(game, outcome, rng) {
     if (tile.monster === b.monster) tile.hp = tile.maxHp ?? b.maxHp;
     respawn(game, p);
   } else if (outcome.type === "victory") {
+    if (!b.countedMonster) countMonsterKill(p, b.monster);
     game.winner = p.id;
+    game.finishedAt = now;
     phase(game, "won", {}, p.id);
     log(game, p.name + " 击败原初之王，赢得本局！");
   } else if (outcome.type === "monsterWin") {
+    if (!b.countedMonster && !b.enemies) countMonsterKill(p, b.monster);
     if (tile.boss) tile.monster = tile.boss;
     else delete tile.monster;
     delete tile.hp;
@@ -1205,12 +1300,21 @@ function boardItems(game, p) {
 }
 
 function actorId(game) {
-  return pendingUpgrade(game)?.id ?? game.battle?.actorId ?? game.actor;
+  if (game.offlineVote) return game.offlineVote.playerId;
+  const required = pendingUpgrade(game);
+  return required
+    ? upgradeChooser(game, required)
+    : (game.battle?.actorId ?? game.actor);
 }
 
 function actions(game, id) {
   const p = player(game, id);
-  if (!p?.online || game.winner || actorId(game) !== id) return [];
+  if (!p?.online || game.winner) return [];
+  if (game.offlineVote)
+    return game.offlineVote.votes.includes(id)
+      ? []
+      : [action("skipOffline", "确认跳过离线玩家的回合")];
+  if (actorId(game) !== id) return [];
   const required = pendingUpgrade(game);
   if (required) {
     const loss = required.kind === "downgrade";
@@ -1322,37 +1426,50 @@ function actions(game, id) {
   ];
 }
 
-export function act(game, playerId, actionId, rng = Math.random) {
-  performAction(game, playerId, actionId, rng);
+export function act(
+  game,
+  playerId,
+  actionId,
+  rng = Math.random,
+  now = Date.now(),
+) {
+  performAction(game, playerId, actionId, rng, now);
   advanceIdleTurn(game, rng);
 }
 
 function advanceIdleTurn(game, rng) {
   if (!game.players.some((p) => p.online)) return;
-  while (game.phase === "end" && !pendingUpgrade(game)) {
+  while (game.phase === "end" && !game.offlineVote && !pendingUpgrade(game)) {
     const p = player(game, game.actor);
     if (p.online && boardItems(game, p).length) return;
     nextTurn(game, rng);
   }
 }
 
-function performAction(game, playerId, actionId, rng) {
+function performAction(game, playerId, actionId, rng, now) {
   if (!actions(game, playerId).some((a) => a.id === actionId))
     throw new Error("当前无法执行这个行动");
   const p = player(game, playerId);
   game.movements = [];
+  if (actionId === "skipOffline") {
+    game.offlineVote.votes.push(playerId);
+    reconcileOfflineVote(game, rng, now);
+    return;
+  }
   const required = pendingUpgrade(game);
   if (required) {
+    const upgraded = player(game, required.id);
     const stat = actionId.split(":")[1];
     const loss = required.kind === "downgrade";
     const amount = loss ? -1 : required.kind === "badge" ? badgeBonus : 1;
-    upgrade(p, stat, amount);
-    if (required.kind === "badge") p.badgeStat = stat;
+    upgrade(upgraded, stat, amount);
+    if (required.kind === "badge") upgraded.badgeStat = stat;
     if (--required.count === 0) removeOne(game.upgrades, required);
-    if (stat === "act") refreshAttackAllowance(game, p.id);
+    if (stat === "act") refreshAttackAllowance(game, upgraded.id);
     log(
       game,
-      p.name +
+      (upgraded.id === playerId ? "" : `${p.name} 为 `) +
+        upgraded.name +
         " 的" +
         stats[stat] +
         (loss ? "降低 1 点。" : "提升 " + amount + " 点。"),
@@ -1360,7 +1477,9 @@ function performAction(game, playerId, actionId, rng) {
     return;
   }
   if (game.phase === "battle") {
+    const before = game.combatSequence ?? 0;
     const outcome = actBattle(game, playerId, actionId, rng);
+    countBattleKills(game, before);
     if (game.battle.redistribute) {
       const owner = player(game, game.battle.redistribute);
       delete game.battle.redistribute;
@@ -1368,7 +1487,7 @@ function performAction(game, playerId, actionId, rng) {
       refreshAttackAllowance(game, owner.id);
     }
     game.players.forEach((p) => syncBadge(game, p));
-    settleBattle(game, outcome, rng);
+    settleBattle(game, outcome, rng, now);
     if (game.log.length > 120) game.log.splice(0, game.log.length - 120);
     return;
   }
@@ -1447,29 +1566,24 @@ function performAction(game, playerId, actionId, rng) {
   }
 }
 
-function interruptOffline(game) {
+function pauseOfflineAction(game, rng, now, skipTurn = false) {
   if (!game.players.some((p) => p.online) || game.winner) return;
-  let b = game.battle;
-  if (b?.pendingOutcome && b.actors.some((id) => !player(game, id).online)) {
-    settleBattle(game, b.pendingOutcome, Math.random);
-    b = null;
-  }
-  if (b && b.actors.some((id) => !player(game, id).online)) {
-    if (b.monster) {
-      const tile = tileAt(game, player(game, b.first));
-      tile.hp = b.hp;
-      tile.monsterState = battleMonsterState(b);
-      phase(game, "resumeMonster", {
-        monster: b.monster,
-        encounter: tile.encounter,
-        battle: b,
-        dice: game.dice,
-      });
-    } else {
-      phase(game, "end");
-    }
+  const b = game.battle;
+  if (b?.monster && !player(game, b.first).online && b.pendingOutcome) {
+    settleBattle(game, b.pendingOutcome, rng, now);
+    if (game.winner) return;
+  } else if (b?.monster && !player(game, b.first).online) {
+    const tile = tileAt(game, player(game, b.first));
+    tile.hp = b.hp;
+    tile.monsterState = battleMonsterState(b);
+    phase(game, "resumeMonster", {
+      monster: b.monster,
+      encounter: tile.encounter,
+      battle: b,
+      dice: game.dice,
+    });
     game.battle = null;
-    log(game, "战斗因玩家离线中断。");
+    log(game, "怪物战斗已保留，玩家回归后可继续。");
   }
   if (game.phase === "itemTarget" && game.pending.back.value === "skirmish") {
     const match = game.pending.back.pending;
@@ -1489,7 +1603,7 @@ function interruptOffline(game) {
       game.check = null;
       game.mods = {};
       const { portal, trapped } = game.pending;
-      land(game, entrant, Math.random, { portal, trapped, skipClash: true });
+      land(game, entrant, rng, { portal, trapped, skipClash: true });
     }
   }
   const owner = player(game, game.actor);
@@ -1509,24 +1623,99 @@ function interruptOffline(game) {
     phase(game, "end");
     if (player(game).online) return;
   }
-  if (!player(game).online && game.phase !== "loot" && game.phase !== "replace")
-    nextTurn(game, Math.random);
+  if (
+    skipTurn &&
+    !player(game).online &&
+    game.phase !== "loot" &&
+    game.phase !== "replace"
+  )
+    nextTurn(game, rng);
+}
+
+function offlineVoteProgress(game) {
+  const vote = game.offlineVote;
+  if (!vote) return null;
+  const online = game.players.filter((p) => p.online);
+  return {
+    playerId: vote.playerId,
+    confirmed: online.filter((p) => vote.votes.includes(p.id)).length,
+    required: online.length,
+  };
+}
+
+function reconcileOfflineVote(game, rng, now) {
+  const vote = offlineVoteProgress(game);
+  if (!vote) return;
+  const seat = player(game, vote.playerId);
+  if (seat.online || seat.id !== game.turn) delete game.offlineVote;
+  else if (vote.required > 0 && vote.confirmed === vote.required) {
+    delete game.offlineVote;
+    log(game, `在线玩家确认跳过 ${seat.name} 的回合。`);
+    pauseOfflineAction(game, rng, now, true);
+  }
+}
+
+export function setPlayersOnline(game, changes, now = Date.now()) {
+  const disconnected = [];
+  let changed = false;
+  for (const { id, online } of changes) {
+    const p = player(game, id);
+    if (!p || p.online === Boolean(online)) continue;
+    p.online = Boolean(online);
+    changed = true;
+    log(game, p.name + (p.online ? " 已重新连接。" : " 暂时离线。"));
+    if (!p.online) {
+      disconnected.push(id);
+      announce(game, `${p.name}掉线了`, "offline");
+    }
+  }
+  if (!changed || game.winner) return;
+  const b = game.battle;
+  const forfeited =
+    b && !b.monster ? b.actors.filter((id) => !player(game, id).online) : [];
+  if (forfeited.length) {
+    game.movements = [];
+    delete game.offlineVote;
+    const winnerId = b.actors.find((id) => player(game, id).online);
+    if (winnerId) {
+      settleBattle(
+        game,
+        { type: "pvpWin", winnerId, loserId: forfeited[0], offline: true },
+        Math.random,
+        now,
+      );
+    } else {
+      game.battle = null;
+      for (const id of forfeited)
+        respawn(game, player(game, id), { duel: true });
+      log(game, "决斗双方均已离线，各自返回起点。");
+    }
+  } else {
+    if (!game.offlineVote && disconnected.includes(game.turn))
+      game.offlineVote = { playerId: game.turn, votes: [] };
+    reconcileOfflineVote(game, Math.random, now);
+    if (game.offlineVote) return;
+    pauseOfflineAction(game, Math.random, now);
+  }
+  advanceIdleTurn(game, Math.random);
 }
 
 export function setOnline(game, id, online) {
-  const p = player(game, id);
-  if (!p || p.online === Boolean(online)) return;
-  p.online = Boolean(online);
-  log(game, p.name + (p.online ? " 已重新连接。" : " 暂时离线。"));
-  interruptOffline(game);
-  advanceIdleTurn(game, Math.random);
+  setPlayersOnline(game, [{ id, online }]);
 }
 
 function describe(game, viewer) {
   if (game.winner)
     return player(game, game.winner).name + " 击败原初之王，赢得本局。";
+  if (game.offlineVote)
+    return (
+      player(game, game.offlineVote.playerId).name +
+      " · 已离线，等待在线玩家确认"
+    );
   const who = player(game, actorId(game))?.name || "";
   const required = pendingUpgrade(game);
+  if (required?.chooser && actorId(game) !== required.id)
+    return `${who} · 替${player(game, required.id).name}选择一项属性升级`;
   if (required)
     return (
       who +
@@ -1639,11 +1828,14 @@ function boardStats(p) {
   };
 }
 
-export function view(game, id) {
+export function view(game, id, now = Date.now()) {
   const b = game.battle;
   let battle = null;
   const choosing =
-    !game.winner && !pendingUpgrade(game) && actorId(game) === id;
+    !game.winner &&
+    !game.offlineVote &&
+    !pendingUpgrade(game) &&
+    actorId(game) === id;
   const itemMenu =
     choosing && game.phase === "itemTarget"
       ? boardItemMenu(game)
@@ -1703,6 +1895,7 @@ export function view(game, id) {
       online: p.online,
       pos: p.pos,
       hp: p.hp,
+      milestones: p.milestones ?? emptyMilestones(),
       atk: p.atk,
       def: p.def,
       act: p.act,
@@ -1734,15 +1927,24 @@ export function view(game, id) {
     battleEffectEvents: game.battleEffectEvents || [],
     turn: game.turn,
     actor: actorId(game),
-    phase: pendingUpgrade(game) && !game.winner ? "upgrade" : game.phase,
+    phase: game.offlineVote
+      ? "offlineVote"
+      : pendingUpgrade(game) && !game.winner
+        ? "upgrade"
+        : game.phase,
     round: game.round,
+    elapsedMs: Math.max(0, (game.finishedAt ?? now) - (game.startedAt ?? now)),
+    announcements: game.announcements || [],
+    offlineVote: offlineVoteProgress(game),
     battle,
     itemMenu,
     actions: actions(game, id),
     winner: game.winner,
     log: game.log.slice(-120),
     prompt: describe(game, id),
-    dice: game.dice ? { ...game.dice, review: diceReview(game) } : null,
+    dice: game.dice
+      ? { ...game.dice, review: game.offlineVote ? null : diceReview(game) }
+      : null,
     movementSequence: game.sequence,
     movementPreview: movementPreview(game, id),
     movements: game.movements || [],

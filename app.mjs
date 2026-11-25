@@ -6,6 +6,8 @@ import {
   art,
   cardEffects,
   textLines,
+  formatElapsed,
+  offlineVotePrompt,
   palette,
   regions,
   tiles,
@@ -63,6 +65,10 @@ let snapshot = "",
   noticeTimer,
   combatSequence = 0,
   battleEffectSequence = 0,
+  announcementSequence = 0,
+  announcementTimer = null,
+  gameClock = null,
+  clockTimer,
   playback = null,
   shownWinner = null,
   diceAnimation = null,
@@ -77,6 +83,12 @@ let snapshot = "",
   muted = store.get("muted") ?? false;
 const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const visualQueue = [];
+const announcementQueue = [];
+const announcementLive = document.createElement("div");
+announcementLive.className = "announcement-live";
+announcementLive.setAttribute("role", "status");
+announcementLive.setAttribute("aria-atomic", "true");
+document.body.append(announcementLive);
 document
   .querySelectorAll("[data-icon]")
   .forEach((el) => el.replaceWith(fragment(icon(el.dataset.icon))));
@@ -536,9 +548,11 @@ function renderRoom(displayGame = room?.game, combatResolving = false) {
     : lobby(room);
   if (controlsLocked()) {
     $(".action-row")?.setAttribute("inert", "");
-    $(".exit-dock")?.setAttribute("inert", "");
+    $(".exit-dock .surrender-button")?.setAttribute("inert", "");
     $(".reward-panel")?.setAttribute("inert", "");
   }
+  tickGameClock();
+  updateOfflineVote();
   zoomMovementPreview();
   diceAnimation?.position();
   for (const id of openPanels) {
@@ -593,11 +607,100 @@ function cancelPlayback() {
   handSelection = null;
   combatSequence = 0;
   battleEffectSequence = 0;
+  clearTimeout(clockTimer);
+  gameClock = null;
+  resetAnnouncements();
   shownWinner = null;
   app.classList.remove("moving-board");
 }
 function controlsLocked() {
   return !!playback;
+}
+
+function tickGameClock() {
+  clearTimeout(clockTimer);
+  if (!gameClock) return;
+  const { elapsed, receivedAt, frozen, lastSecond } = gameClock;
+  const current = elapsed + (frozen ? 0 : performance.now() - receivedAt);
+  const second = frozen
+    ? Math.floor(current / 1000)
+    : Math.max(lastSecond, Math.floor(current / 1000));
+  gameClock.lastSecond = second;
+  const timer = $(".elapsed-timer");
+  const duration = "PT" + second + "S";
+  if (timer && timer.dateTime !== duration) {
+    timer.dateTime = duration;
+    timer.textContent = formatElapsed(second * 1000);
+  }
+  if (!frozen)
+    clockTimer = setTimeout(
+      tickGameClock,
+      Math.max(20, (second + 1) * 1000 - current),
+    );
+}
+
+function syncGameClock(g, receivedAt, sameGame) {
+  gameClock = g
+    ? {
+        elapsed: Math.max(0, g.elapsedMs || 0),
+        receivedAt,
+        frozen: !!g.winner,
+        lastSecond: sameGame ? (gameClock?.lastSecond ?? 0) : 0,
+      }
+    : null;
+  tickGameClock();
+}
+
+function updateOfflineVote() {
+  const target = $(".offline-vote-region");
+  if (!target) return;
+  const html = offlineVotePrompt(room?.game, !controlsLocked());
+  if (target.innerHTML !== html) target.innerHTML = html;
+}
+
+function resetAnnouncements() {
+  clearTimeout(announcementTimer);
+  announcementTimer = null;
+  announcementSequence = 0;
+  announcementQueue.length = 0;
+  $(".game-announcement")?.remove();
+  announcementLive.textContent = "";
+}
+
+function playAnnouncement() {
+  if (announcementTimer || !announcementQueue.length) return;
+  const { kind, text } = announcementQueue.shift();
+  const layer = document.createElement("div");
+  layer.className = "game-announcement";
+  layer.dataset.kind = kind;
+  layer.setAttribute("aria-hidden", "true");
+  layer.innerHTML =
+    '<p class="announcement-banner">' +
+    icon(kind === "rebirth" ? "fire" : "flag") +
+    "</p>";
+  layer.firstElementChild.append(document.createTextNode(text));
+  const duration = 2800;
+  layer.style.setProperty("--announcement-duration", duration + "ms");
+  document.body.append(layer);
+  announcementLive.textContent = text;
+  announcementTimer = setTimeout(() => {
+    layer.remove();
+    announcementLive.textContent = "";
+    announcementTimer = null;
+    playAnnouncement();
+  }, duration);
+}
+
+function syncAnnouncements(events, sameGame) {
+  if (sameGame) {
+    for (const event of events)
+      if (event.seq > announcementSequence) announcementQueue.push(event);
+  }
+  announcementSequence = Math.max(
+    announcementSequence,
+    events.at(-1)?.seq ?? 0,
+  );
+  playAnnouncement();
 }
 
 function sameDiceResult(previous, next) {
@@ -611,9 +714,9 @@ function sameDiceResult(previous, next) {
   );
 }
 
-function nextDiceReview(previous, next, sameGame) {
+function nextDiceReview(previous, next, sameGame, resumedVote) {
   if (!next?.review?.key || !next.values?.length) return null;
-  if (!sameGame || next.rollId !== previous?.rollId) return next;
+  if (!sameGame || resumedVote || next.rollId !== previous?.rollId) return next;
   if (next.review.key !== previous?.review?.key) return null;
   return reviewedDice || !sameDiceResult(previous, next) ? next : null;
 }
@@ -625,17 +728,23 @@ function renderDiceReview() {
 }
 
 function setRoom(next) {
-  const signature = JSON.stringify(next);
+  const receivedAt = performance.now();
+  const signature = JSON.stringify(next, (key, value) =>
+    key === "elapsedMs" ? undefined : value,
+  );
   lastPoll = Date.now();
-  if (snapshot === signature) return;
   const old = room;
   room = next;
-  snapshot = signature;
   const sameGame =
     old?.id === next.id &&
     old?.game &&
     next.game &&
     old.game.matchId === next.game.matchId;
+  if (snapshot === signature) {
+    syncGameClock(next.game, receivedAt, sameGame);
+    return;
+  }
+  snapshot = signature;
   const events = next.game?.combatEvents || [];
   const effectEvents = next.game?.battleEffectEvents || [];
   if (!sameGame) {
@@ -644,6 +753,8 @@ function setRoom(next) {
     battleEffectSequence = effectEvents.at(-1)?.seq ?? 0;
     if (next.game) travel();
   }
+  syncGameClock(next.game, receivedAt, sameGame);
+  syncAnnouncements(next.game?.announcements || [], sameGame);
   const strikes = events.filter((event) => event.seq > combatSequence);
   combatSequence = Math.max(combatSequence, events.at(-1)?.seq ?? 0);
   const effects = effectEvents.filter(
@@ -658,7 +769,8 @@ function setRoom(next) {
       ? next.game.movements
       : [];
   const dice = next.game?.dice;
-  reviewedDice = nextDiceReview(old?.game?.dice, dice, sameGame);
+  const resumedVote = old?.game?.offlineVote && !next.game?.offlineVote;
+  reviewedDice = nextDiceReview(old?.game?.dice, dice, sameGame, resumedVote);
   if (
     sameGame &&
     !reduced &&
@@ -681,6 +793,7 @@ function setRoom(next) {
   if (moves.length && !reduced) visualQueue.push({ game: next.game, moves });
   const alreadyPlaying = controlsLocked();
   if (alreadyPlaying) {
+    updateOfflineVote();
     const messages = $(".chat-msg");
     if (messages && JSON.stringify(old.chat) !== JSON.stringify(next.chat)) {
       const scrollToEnd = atEnd(messages);
@@ -1432,7 +1545,7 @@ async function click(e) {
     }
     if (d.action && controlsLocked()) return;
     if (
-      d.action &&
+      d.action?.startsWith("discard:") &&
       room?.game?.phase === "deathDiscard" &&
       !overlay.firstChild
     ) {
@@ -1595,8 +1708,10 @@ app.addEventListener(
   "toggle",
   (e) => {
     const panel = e.target;
-    if (!panel.matches(".field-panel[open]")) return;
-    for (const other of app.querySelectorAll(".field-panel[open]")) {
+    if (!panel.matches(".field-tools .field-panel[open]")) return;
+    for (const other of app.querySelectorAll(
+      ".field-tools .field-panel[open]",
+    )) {
       if (other !== panel) other.open = false;
     }
   },

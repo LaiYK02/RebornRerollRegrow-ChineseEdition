@@ -184,6 +184,7 @@ function applyDamage(s, id, amount) {
   }
   changeHP(s, id, -amount);
   const lost = before - hp(s, id);
+  if (!s.battle.monster && lost > 0) s.battle.pvpRoundDamaged = true;
   if (!hp(s, id) && gearCount(s, id, "l04")) {
     const p = player(s, id);
     p.gear.splice(p.gear.indexOf("l04"), 1);
@@ -453,6 +454,10 @@ export function startBattle(
     if (effect(s, "b02.1")) status(s, b.first).envy = 2;
     if (effect(s, "b02.3")) status(s, b.first).gearSeal = true;
     restoreEnemyLanes(s, monsterState?.enemies);
+  } else {
+    b.pvpQuietRounds = 0;
+    b.pvpRoundDamaged = false;
+    b.knightCleansedBy = [];
   }
   log(
     s,
@@ -602,6 +607,28 @@ function checkEnd(s) {
   return !!b.outcome;
 }
 
+function finishPvpRound(s) {
+  const b = s.battle;
+  b.pvpQuietRounds = b.pvpRoundDamaged ? 0 : (b.pvpQuietRounds ?? 0) + 1;
+  b.pvpRoundDamaged = false;
+  if (b.pvpQuietRounds < 5) return false;
+
+  const firstHP = hp(s, b.first);
+  const secondHP = hp(s, b.second);
+  if (firstHP === secondHP) {
+    setOutcome(s, { type: "pvpDraw" });
+    log(s, "连续 5 轮无人受到实际伤害，双方生命相同，决斗平局。");
+  } else {
+    const winnerId = firstHP > secondHP ? b.first : b.second;
+    setOutcome(s, { type: "pvpWin", winnerId, loserId: rival(b, winnerId) });
+    log(
+      s,
+      `连续 5 轮无人受到实际伤害，${name(s, winnerId)}以较高生命赢得决斗。`,
+    );
+  }
+  return true;
+}
+
 function endTurn(s) {
   const b = s.battle,
     f = b.fighters[b.side];
@@ -628,6 +655,7 @@ function endTurn(s) {
   const next = b.fighters[b.side];
   if (next.status.disarm <= next.turns) delete next.status.disarm;
   if (b.side === b.first) {
+    if (!b.monster && finishPvpRound(s)) return;
     if (effect(s, "b06.2") && b.round >= 10) {
       const frame = combatFrame(s);
       log(s, `${name(s, MONSTER)}在第 10 轮结束时自爆！`);
@@ -1305,7 +1333,7 @@ function battlePhaseActions(s, id) {
   return [main, ...itemChoices(s, id)];
 }
 
-function applyItemEffect(s, card, selected) {
+function applyItemEffect(s, id, card, selected) {
   const { targetId, effectKey, effectType } = selected;
   if (card === "i12") {
     const label = effectText(s, effectKey);
@@ -1322,6 +1350,10 @@ function applyItemEffect(s, card, selected) {
     const keys =
       card === "i14" ? [effectKey] : cleanseOptions(s, targetId, effectType);
     for (const key of keys) cleanse(s, targetId, key);
+    if (!s.battle.monster && keys.includes("knight")) {
+      const cleansedBy = (s.battle.knightCleansedBy ??= []);
+      if (!cleansedBy.includes(id)) cleansedBy.push(id);
+    }
     recordBattleEffect(
       s,
       card,
@@ -1392,7 +1424,7 @@ function useItem(s, id, card, arg, rng, selected) {
     case "i13":
     case "i14":
     case "i15":
-      applyItemEffect(s, card, selected);
+      applyItemEffect(s, id, card, selected);
       break;
     case "i16":
       status(s, id).knight = status(s, other).knight = 1;
