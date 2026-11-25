@@ -433,3 +433,5 @@ test("自己的物品可见，对手只显示数量；胜者和其余三名玩�
   for (const name of ["黎明", "黄昏", "夜游"])
     assert.ok(end.includes(name + " · 失败"));
 });
+
+//LMK 到此一游
